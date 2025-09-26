@@ -1,1 +1,1 @@
-from .core import Headless
+from .core import Headless, SearchScraper
