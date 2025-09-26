@@ -151,3 +151,78 @@ class Headless:
             self.quit()
         except Exception as e:
             print(f"Error exiting context: {e}")
+
+class SearchScraper:
+    def __init__(
+        self,
+        driver=None,
+        max_results: int = 10,
+        result_processor: Optional[Callable[[str, str], Dict]] = None,
+        headless_options: Optional[dict] = None,
+        search_engine_url: str = "https://duckduckgo.com/?q={query}"
+    ):
+        self.driver = driver
+        self.max_results = max_results
+        self.result_processor = result_processor or self.default_result_processor
+        self.headless_options = headless_options or {}
+        self.search_engine_url = search_engine_url
+        self.results: List[Dict] = []
+
+    def default_result_processor(self, url: str, snippet: str) -> Dict:
+        return {"url": url, "snippet": snippet}
+
+    def get_driver(self):
+        if not self.driver:
+            from_headless = Headless(**self.headless_options)
+            self.driver_context = from_headless
+            self.driver = from_headless.get_driver()
+        return self.driver
+
+    def search(self, query: str, max_results: Optional[int] = None) -> List[Dict]:
+        driver = self.get_driver()
+        max_results = max_results or self.max_results
+        search_url = self.search_engine_url.format(query=quote_plus(query))
+        driver.get(search_url)
+
+        try:
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "[data-testid='result']"))
+            )
+        except TimeoutException:
+            print(f"No results found for query: {query}")
+            return []
+
+        results_elements = driver.find_elements(By.CSS_SELECTOR, "[data-testid='result']")
+        extracted_results: List[Tuple[str, str]] = []
+
+        for elem in results_elements[:max_results]:
+            try:
+                link_elem = elem.find_element(By.CSS_SELECTOR, "[data-testid='result-title-a']")
+                snippet_elem = elem.find_element(By.CSS_SELECTOR, "[data-result='snippet']")
+                href = link_elem.get_attribute("href")
+                snippet = snippet_elem.text if snippet_elem else ""
+                if href:
+                    extracted_results.append((href, snippet))
+            except Exception:
+                continue
+
+        unique_results = []
+        seen = set()
+        for url, snippet in extracted_results:
+            if url not in seen:
+                seen.add(url)
+                unique_results.append(self.result_processor(url, snippet))
+                if len(unique_results) >= max_results:
+                    break
+
+        self.results.extend(unique_results)
+        return unique_results
+
+    def quit(self):
+        if hasattr(self, "driver_context"):
+            self.driver_context.quit()
+        elif self.driver:
+            try:
+                self.driver.quit()
+            except Exception:
+                pass
