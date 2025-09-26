@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "headless-driver"
+version = "0.0.1"
+description = "A simple Python package for managing Selenium Chrome drivers in headless mode."
+authors = [
+    { name="nuhmanpk", email="nuhmanpk7@gmail.com" }
+]
+license = { file = "LICENSE" }
+readme = "README.md"
+requires-python = ">=3.7"
+dependencies = [
+    "selenium>=4.0.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/nuhmanpk/headless-driver"
