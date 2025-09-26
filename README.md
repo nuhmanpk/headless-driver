@@ -45,6 +45,20 @@ with Headless() as driver:
     print(driver.title)
 ```
 
+## Search
+
+```python
+from headless import SearchScraper, Headless
+
+hl = Headless()
+driver = hl.get_driver()
+
+scraper = SearchScraper(driver=driver, max_results=5)
+
+results = scraper.search("Nuhman PK github")
+print(results)
+```
+
 ## API Documentation
 
 ### Headless class
