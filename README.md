@@ -1,5 +1,10 @@
 [![PyPI version](https://badge.fury.io/py/headless-driver.svg)](https://badge.fury.io/py/headless-driver)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python Versions](https://img.shields.io/pypi/pyversions/headless-driver.svg)](https://pypi.org/project/headless-driver/)
+[![Build Status](https://github.com/nuhmanpk/headless-driver/workflows/CI/badge.svg)](https://github.com/nuhmanpk/headless-driver/actions)
+[![Coverage Status](https://coveralls.io/repos/github/nuhmanpk/headless-driver/badge.svg?branch=main)](https://coveralls.io/github/nuhmanpk/headless-driver?branch=main)
+[![Downloads](https://pepy.tech/badge/headless-driver)](https://pepy.tech/project/headless-driver)
+
 
 # headless-driver
 
