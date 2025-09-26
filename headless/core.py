@@ -8,6 +8,7 @@ from typing import List, Optional, Dict, Tuple, Callable
 import sys
 import platform
 from selenium import webdriver
+from urllib.parse import quote_plus
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.remote.webdriver import WebDriver
