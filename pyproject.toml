@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "headless-driver"
-version = "0.0.5"
+version = "0.0.6"
 description = "A simple Python package for managing Selenium Chrome drivers in headless mode."
 authors = [
     { name="nuhmanpk", email="nuhmanpk7@gmail.com" }
