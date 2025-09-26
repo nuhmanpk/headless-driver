@@ -1,8 +1,11 @@
 [![PyPI version](https://badge.fury.io/py/headless-driver.svg)](https://badge.fury.io/py/headless-driver)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Build Status](https://github.com/nuhmanpk/headless-driver/actions/workflows/python-package.yml/badge.svg)](https://github.com/nuhmanpk/headless-driver/actions)
 
 # headless-driver
+
+<center>
+<img src="https://raw.githubusercontent.com/nuhmanpk/headless-driver/refs/heads/main/images/logo.png?token=GHSAT0AAAAAAC4U5AF3EWU6P6Z5M2XZOX5C2GW3A2Q">
+</center>
 
 A simple Python package for managing Selenium Chrome drivers in headless mode.
 
