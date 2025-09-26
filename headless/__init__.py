@@ -1,1 +1,1 @@
-# headless package init
+from .core import Headless

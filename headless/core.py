@@ -4,10 +4,45 @@ import shutil
 import tempfile
 from typing import List, Optional, Tuple
 
+
+import sys
+import platform
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.remote.webdriver import WebDriver
+
+def find_chromedriver_path() -> Optional[str]:
+    """
+    Try to find the chromedriver executable based on OS.
+    Returns the path if found, else None.
+    """
+    import shutil
+    # Common locations
+    candidates = []
+    system = platform.system().lower()
+    if system == "linux":
+        candidates = [
+            shutil.which("chromedriver"),
+            "/usr/bin/chromedriver",
+            "/usr/local/bin/chromedriver",
+        ]
+    elif system == "darwin":
+        candidates = [
+            shutil.which("chromedriver"),
+            "/opt/homebrew/bin/chromedriver",
+            "/usr/local/bin/chromedriver",
+        ]
+    elif system == "windows":
+        candidates = [
+            shutil.which("chromedriver"),
+            "C:\\Program Files\\ChromeDriver\\chromedriver.exe",
+            "C:\\chromedriver\\chromedriver.exe",
+        ]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return None
 
 class Headless:
     def __init__(
@@ -37,9 +72,9 @@ class Headless:
         )
         self.headless = headless
         self.additional_args = additional_args or []
-        self.chrome_driver_path = chrome_driver_path
+        self.chrome_driver_path = chrome_driver_path or find_chromedriver_path()
         self.remote_url = remote_url
-        self._driver: Optional[WebDriver] = None
+        self._driver = None
 
     def _build_options(self) -> Options:
         opts = Options()
@@ -60,39 +95,59 @@ class Headless:
             return self._driver
 
         opts = self._build_options()
-
-        if self.remote_url:
-            self._driver = webdriver.Remote(
-                command_executor=self.remote_url,
-                options=opts
-            )
-        else:
-            if self.chrome_driver_path:
-                service = Service(executable_path=self.chrome_driver_path)
-                self._driver = webdriver.Chrome(
-                    service=service,
+        try:
+            if self.remote_url:
+                self._driver = webdriver.Remote(
+                    command_executor=self.remote_url,
                     options=opts
                 )
             else:
-                self._driver = webdriver.Chrome(
-                    options=opts
-                )
-
+                if self.chrome_driver_path:
+                    service = Service(executable_path=self.chrome_driver_path)
+                    self._driver = webdriver.Chrome(
+                        service=service,
+                        options=opts
+                    )
+                else:
+                    self._driver = webdriver.Chrome(
+                        options=opts
+                    )
+        except Exception as e:
+            import traceback
+            from selenium.common.exceptions import SessionNotCreatedException, WebDriverException
+            if isinstance(e, SessionNotCreatedException):
+                print("Error: ChromeDriver and Chrome browser versions are incompatible. Please update ChromeDriver to match your browser version.")
+            elif isinstance(e, WebDriverException):
+                print(f"WebDriver error: {e}")
+            else:
+                print(f"Failed to start Chrome WebDriver: {e}\n{traceback.format_exc()}")
+            self._driver = None
+            raise
         return self._driver
 
     def quit(self) -> None:
         if self._driver:
             try:
                 self._driver.quit()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Error quitting WebDriver: {e}")
             self._driver = None
 
         if self._cleanup_dir and os.path.isdir(self.user_data_dir):
-            shutil.rmtree(self.user_data_dir, ignore_errors=True)
+            try:
+                shutil.rmtree(self.user_data_dir, ignore_errors=True)
+            except Exception as e:
+                print(f"Error cleaning up user data directory: {e}")
 
     def __enter__(self) -> WebDriver:
-        return self.get_driver()
+        try:
+            return self.get_driver()
+        except Exception as e:
+            print(f"Error entering context: {e}")
+            raise
 
-    def __exit__(self) -> None:
-        self.quit()
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        try:
+            self.quit()
+        except Exception as e:
+            print(f"Error exiting context: {e}")
