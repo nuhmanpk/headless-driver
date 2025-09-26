@@ -9,10 +9,15 @@ import sys
 import platform
 from selenium import webdriver
 from urllib.parse import quote_plus
+from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.remote.webdriver import WebDriver
+from selenium.webdriver.support import expected_conditions as EC
+
+
 
 def find_chromedriver_path() -> Optional[str]:
     """
