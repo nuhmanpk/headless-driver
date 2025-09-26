@@ -3,11 +3,12 @@
 
 # headless-driver
 
+A simple Python package for managing Selenium Chrome drivers in headless mode.
+
 <center>
-<img src="https://raw.githubusercontent.com/nuhmanpk/headless-driver/refs/heads/main/images/logo.png?token=GHSAT0AAAAAAC4U5AF3EWU6P6Z5M2XZOX5C2GW3A2Q">
+<img src="./images/logo.png">
 </center>
 
-A simple Python package for managing Selenium Chrome drivers in headless mode.
 
 ## Features
 - Headless Chrome driver management
