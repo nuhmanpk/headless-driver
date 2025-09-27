@@ -1,24 +1,75 @@
 [build-system]
-requires = ["setuptools>=42", "wheel"]
+requires = ["setuptools>=42", "wheel", "setuptools_scm"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "headless-driver"
-version = "0.1.1"
-description = "A simple Python package for managing Selenium Chrome drivers in headless mode."
-authors = [
-    { name="nuhmanpk", email="nuhmanpk7@gmail.com" }
-]
-license = "MIT"
+version = "0.1.2"
+description = "Lightweight Python library to manage Selenium Chrome WebDriver in headless mode with proxy, stealth, auto-driver installation, multi-driver management, download handling, and advanced search scraping utilities."
 readme = "README.md"
 requires-python = ">=3.7"
-    dependencies = [
-        "selenium==4.35.0"
-    ]
+license = { text = "MIT" }
+authors = [
+  { name = "nuhmanpk", email = "nuhmanpk7@gmail.com" }
+]
+dependencies = [
+  "selenium==4.35.0"
+]
+
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.7",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: Internet :: WWW/HTTP :: Browsers"
+]
+
+keywords = ["selenium", "headless", "chrome", "webdriver", "scraper", "automation"]
 
 [project.urls]
 Homepage = "https://github.com/nuhmanpk/headless-driver"
+Documentation = "https://github.com/nuhmanpk/headless-driver/wiki"
+Source = "https://github.com/nuhmanpk/headless-driver"
+Issues = "https://github.com/nuhmanpk/headless-driver/issues"
+
+[project.scripts]
+headless-driver = "headless.cli:main"
+
+[project.optional-dependencies]
+auto = [
+  "webdriver-manager>=4.0.0"
+]
+stealth = [
+  "selenium-stealth>=1.0.6"
+]
+firefox = [
+  "geckodriver-autoinstaller>=0.1.0"
+]
+testing = [
+  "pytest>=7.0",
+  "pytest-cov>=4.0"
+]
+dev = [
+  "black>=23.0",
+  "isort>=5.0",
+  "mypy>=0.991",
+  "pre-commit>=3.0"
+]
+docs = [
+  "sphinx>=5.0",
+  "sphinx-rtd-theme>=1.0"
+]
 
 [tool.setuptools.packages.find]
 include = ["headless*"]
 exclude = ["images*"]
+
+[tool.setuptools_scm]
+version_scheme = "post-release"
+local_scheme = "no-local-version"
