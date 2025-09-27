@@ -186,10 +186,10 @@ Headless(
 - `get_driver()`: Returns a Selenium WebDriver instance
 - `quit()`: Quits the driver and cleans up user data
 
-## Running Tests
-
+## Install Driver on Linux
 ```bash
-python -m unittest discover tests
+sudo apt update
+sudo apt install -y chromium chromium-driver
 ```
 
 [Happy coding 🚀](https://github.com/nuhmanpk/)

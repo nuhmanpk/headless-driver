@@ -1,1 +1,4 @@
 selenium==4.35.0
+webdriver-manager>=4.0.0
+selenium-stealth>=1.0.6
+geckodriver-autoinstaller>=0.1.0
