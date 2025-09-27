@@ -59,7 +59,8 @@ class ExtendedHeadless(CoreHeadless):
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
         opts.add_argument("--disable-gpu")
-        opts.binary_location = self.chrome_binary_path
+        if self.chrome_binary_path and os.path.exists(self.chrome_binary_path):
+            opts.binary_location = self.chrome_binary_path
 
         return opts
 
