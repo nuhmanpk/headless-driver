@@ -22,7 +22,9 @@ Lightweight Python package to manage Selenium WebDriver in headless mode with pr
 - Download folder management and automatic cleanup
 - Screenshot and PDF export via Chrome DevTools
 - Multi-driver manager to run many isolated browser instances
-- Advanced search scraper (DuckDuckGo default) with title, snippet, favicon, cached link, and batch search/export support
+- Advanced search scraper with title, snippet, favicon, cached link, and batch search/export support
+- DuckDuckGo's no-JavaScript endpoint by default, with automatic fallback to Bing, Mojeek, Startpage, Google and Yandex when an engine blocks the request
+- Bounded page-load timeouts, so a stalled engine fails over instead of hanging
 
 ## Installation
 
@@ -55,16 +57,23 @@ with Headless() as driver:
 ## Search
 
 ```python
-from headless import SearchScraper, Headless
+from headless import SearchScraper
 
-hl = Headless()
-driver = hl.get_driver()
-
-scraper = SearchScraper(driver=driver, max_results=5)
-
-results = scraper.search("Nuhman PK github")
-print(results)
+with SearchScraper(max_results=5) as scraper:
+    results = scraper.search("Nuhman PK github")
+    print(results)                # [{"url": ..., "snippet": ...}, ...]
+    print(scraper.last_engine)    # which engine actually answered
 ```
+
+Searching starts at DuckDuckGo's no-JavaScript endpoint
+(`html.duckduckgo.com`), which returns server-rendered HTML and so is markedly
+faster than the JavaScript front end. If an engine serves a bot check, returns
+nothing, or stalls, the next one in the chain is tried automatically:
+
+    duckduckgo -> duckduckgo_lite -> bing -> mojeek
+               -> duckduckgo_js -> startpage -> google -> yandex
+
+`search()` returns `[]` only once every engine has been tried.
 
 ## Stealth
 
@@ -146,21 +155,54 @@ mgr.quit_all()
 ```python
 from headless import AdvancedSearchScraper
 
-# search_engine: "duckduckgo" (default), "bing" or "google"
 scr = AdvancedSearchScraper(headless_options={"headless": True}, max_results=5)
 
 res = scr.search("python headless")
+print(scr.last_engine)       # engine that produced `res`
 
 batch = scr.search_batch(["python headless", "selenium stealth"], max_workers=2)
 
 scr.export("results.json")   # .json and .csv are supported
 scr.quit()
-
 ```
 
-Search engines defend aggressively against automation. When one serves a bot
-check instead of results, `search()` reports the block and returns an empty
-list; Google does this to headless browsers on most networks.
+Each result is a dict of `url`, `title`, `snippet`, `favicon`, `cached`,
+`quick_answer` and `engine`. Click-tracking redirects (DuckDuckGo `/l/?uddg=`,
+Bing `/ck/a`, Google `/url?q=`) are resolved to the real destination.
+
+### Choosing engines
+
+```python
+# Start somewhere else; the rest of the chain still applies.
+AdvancedSearchScraper(search_engine="bing")
+
+# One engine only, no fallback.
+AdvancedSearchScraper(fallback=False)
+scr.search("python headless", engine="bing")
+
+# Your own order.
+AdvancedSearchScraper(search_engine="duckduckgo", fallback_engines=["bing", "mojeek"])
+```
+
+Available engines: `duckduckgo` (default), `duckduckgo_lite`, `duckduckgo_js`,
+`bing`, `mojeek`, `google`, `startpage`, `yandex`. Add your own with
+`register_engine(name, spec)`.
+
+### Timeouts
+
+```python
+AdvancedSearchScraper(page_load_timeout=20.0, wait_timeout=8.0)
+```
+
+`page_load_timeout` bounds how long one engine may take to load, and
+`wait_timeout` how long to wait for its results to appear. Selenium's own
+default is 300 seconds, so both are set well below it to keep a wedged engine
+from stalling the whole search. `Headless(page_load_timeout=30.0)` applies the
+same bound to any driver it hands out.
+
+Search engines defend aggressively against automation, and Google in particular
+serves a CAPTCHA to headless browsers on most networks. That is why the fallback
+chain exists; blocks are reported when `verbose=True`.
 
 
 
@@ -178,6 +220,7 @@ Headless(
     additional_args: Optional[List[str]] = None,
     remote_url: Optional[str] = None,
     verbose: bool = False,
+    page_load_timeout: Optional[float] = 30.0,
 )
 ```
 
@@ -191,6 +234,7 @@ Headless(
 - `additional_args`: List of extra Chrome arguments
 - `remote_url`: Use remote Selenium server if provided
 - `verbose`: Print driver setup and teardown diagnostics
+- `page_load_timeout`: Seconds a page load may take before it is aborted (`None` disables)
 
 ### Methods
 - `get_driver()`: Returns a Selenium WebDriver instance

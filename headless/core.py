@@ -6,18 +6,10 @@ import tempfile
 from typing import List, Optional, Dict, Tuple, Callable
 
 from selenium import webdriver
-from urllib.parse import quote_plus
-from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.remote.webdriver import WebDriver
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import (
-    TimeoutException,
-    WebDriverException,
-    SessionNotCreatedException,
-)
+from selenium.common.exceptions import WebDriverException, SessionNotCreatedException
 
 
 def install_chromedriver() -> Optional[str]:
@@ -72,6 +64,7 @@ class Headless:
         additional_args: Optional[List[str]] = None,
         remote_url: Optional[str] = None,
         verbose: bool = False,
+        page_load_timeout: Optional[float] = 30.0,
     ):
         self.id = uuid.uuid4().hex
         self.verbose = verbose
@@ -100,6 +93,8 @@ class Headless:
         # the caller's choice and must not be silently replaced.
         self._driver_path_is_guess = not chrome_driver_path
         self.remote_url = remote_url
+        # Selenium defaults to 300s, so one wedged page load looks like a hang.
+        self.page_load_timeout = page_load_timeout
         self._driver: Optional[WebDriver] = None
         if self.verbose:
             print(f"[Headless] Initialized with user_data_dir={self.user_data_dir}, window_size={self.window_size}, headless={self.headless}")
@@ -171,6 +166,7 @@ class Headless:
                 if self.verbose:
                     print("[Headless] Using default ChromeDriver (Selenium Manager).")
                 self._driver = webdriver.Chrome(options=opts)
+            self._apply_timeouts(self._driver)
             if self.verbose:
                 print("[Headless] WebDriver started successfully.")
         except Exception as e:
@@ -186,6 +182,17 @@ class Headless:
             self._driver = None
             raise
         return self._driver
+
+    def _apply_timeouts(self, driver: Optional[WebDriver]) -> None:
+        if not driver or not self.page_load_timeout:
+            return
+        try:
+            driver.set_page_load_timeout(self.page_load_timeout)
+            driver.set_script_timeout(self.page_load_timeout)
+        except WebDriverException:
+            # Not fatal: the driver just keeps its own default timeouts.
+            if self.verbose:
+                print("[Headless] Could not set page load timeout.")
 
     def quit(self) -> None:
         if self._driver:
@@ -230,109 +237,85 @@ class Headless:
 
 
 class SearchScraper:
+    """Simple ``{"url", "snippet"}`` search results.
+
+    Scraping is delegated to :class:`~headless.scraper.AdvancedSearchScraper`, so
+    this class inherits its engine fallback chain and page load timeouts.
+    """
+
     def __init__(
         self,
         driver=None,
         max_results: int = 10,
         result_processor: Optional[Callable[[str, str], Dict]] = None,
         headless_options: Optional[dict] = None,
-        search_engine_url: str = "https://duckduckgo.com/?q={query}",
-        verbose: bool = False
+        search_engine_url: Optional[str] = None,
+        verbose: bool = False,
+        fallback: bool = True,
+        page_load_timeout: float = 20.0,
+        wait_timeout: float = 8.0,
     ):
-        self.driver = driver
+        # Imported here because scraper.py imports this module.
+        from .scraper import AdvancedSearchScraper
+
         self.max_results = max_results
         self.result_processor = result_processor or self.default_result_processor
         self.headless_options = dict(headless_options or {})
         self.search_engine_url = search_engine_url
-        self.results: List[Dict] = []
         self.verbose = verbose
-        self.driver_context: Optional[Headless] = None
-        if self.verbose:
-            print(f"[SearchScraper] Initialized with max_results={self.max_results}, search_engine_url={self.search_engine_url}")
+        self.results: List[Dict] = []
+
+        self._scraper = AdvancedSearchScraper(
+            driver=driver,
+            max_results=max_results,
+            headless_options=self.headless_options,
+            verbose=verbose,
+            fallback=fallback,
+            page_load_timeout=page_load_timeout,
+            wait_timeout=wait_timeout,
+        )
+        if search_engine_url:
+            # A caller-supplied URL is scraped with the DuckDuckGo JS front end's
+            # selectors, which is what this class targeted before.
+            spec = dict(self._scraper.engines["duckduckgo_js"])
+            spec["url"] = search_engine_url
+            self._scraper.register_engine("custom", spec)
+            self._scraper.search_engine = "custom"
+            # A one-off URL has no meaningful fallback chain.
+            self._scraper.fallback = False
 
     def default_result_processor(self, url: str, snippet: str) -> Dict:
         return {"url": url, "snippet": snippet}
 
-    def get_driver(self):
-        if not self.driver:
-            if self.verbose:
-                print("[SearchScraper] Creating Headless driver...")
-            options = dict(self.headless_options)
-            # Caller-supplied verbose in headless_options wins; avoid duplicate kwarg.
-            options.setdefault("verbose", self.verbose)
-            from_headless = Headless(**options)
-            self.driver_context = from_headless
-            self.driver = from_headless.get_driver()
-            if self.verbose:
-                print("[SearchScraper] Headless driver created.")
-        return self.driver
+    @property
+    def driver(self):
+        return self._scraper.driver
+
+    @property
+    def last_engine(self) -> Optional[str]:
+        return self._scraper.last_engine
+
+    def get_driver(self) -> WebDriver:
+        return self._scraper._get_driver()
 
     def search(self, query: str, max_results: Optional[int] = None) -> List[Dict]:
         if self.verbose:
             print(f"[SearchScraper] Searching for: {query}")
-        driver = self.get_driver()
-        max_results = self.max_results if max_results is None else max_results
-        if max_results <= 0:
-            return []
-        search_url = self.search_engine_url.replace("{query}", quote_plus(query))
+        items = self._scraper.search(query, max_results)
+        results = [self.result_processor(i["url"], i["snippet"]) for i in items]
+        self.results.extend(results)
         if self.verbose:
-            print(f"[SearchScraper] Navigating to: {search_url}")
-        driver.get(search_url)
+            print(f"[SearchScraper] Returning {len(results)} results "
+                  f"from {self._scraper.last_engine}.")
+        return results
 
-        try:
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "[data-testid='result']"))
-            )
-            if self.verbose:
-                print("[SearchScraper] Results loaded.")
-        except TimeoutException:
-            print(f"No results found for query: {query}")
-            return []
-
-        results_elements = driver.find_elements(By.CSS_SELECTOR, "[data-testid='result']")
-
-        unique_results: List[Dict] = []
-        seen = set()
-        for elem in results_elements:
-            if len(unique_results) >= max_results:
-                break
-            try:
-                link_elem = elem.find_element(By.CSS_SELECTOR, "[data-testid='result-title-a']")
-                href = link_elem.get_attribute("href")
-            except Exception:
-                continue
-            if not href or href in seen:
-                continue
-            # A missing snippet must not discard an otherwise valid result.
-            snippet_elems = elem.find_elements(By.CSS_SELECTOR, "[data-result='snippet']")
-            snippet = snippet_elems[0].text if snippet_elems else ""
-            seen.add(href)
-            unique_results.append(self.result_processor(href, snippet))
-            if self.verbose:
-                print(f"[SearchScraper] Found result: {href}")
-
-        self.results.extend(unique_results)
-        if self.verbose:
-            print(f"[SearchScraper] Returning {len(unique_results)} unique results.")
-        return unique_results
-
-    def quit(self):
+    def quit(self) -> None:
         if self.verbose:
             print("[SearchScraper] Quitting driver...")
-        if self.driver_context is not None:
-            try:
-                self.driver_context.quit()
-            except Exception as e:
-                print(f"Error quitting driver: {e}")
-            self.driver_context = None
-            self.driver = None
-            if self.verbose:
-                print("[SearchScraper] Driver context quit.")
-        elif self.driver:
-            try:
-                self.driver.quit()
-                if self.verbose:
-                    print("[SearchScraper] Driver quit.")
-            except Exception:
-                pass
-            self.driver = None
+        self._scraper.quit()
+
+    def __enter__(self) -> "SearchScraper":
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.quit()
