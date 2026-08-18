@@ -1,14 +1,12 @@
-from .core import Headless, SearchScraper
+from .core import Headless, SearchScraper, find_chromedriver_path
 from .manager import ExtendedHeadless, MultiDriverManager
 from .scraper import AdvancedSearchScraper
-
-from .core import Headless
 
 __all__ = [
     "Headless",
     "SearchScraper",
-    "CoreSearchScraper",
     "ExtendedHeadless",
     "MultiDriverManager",
     "AdvancedSearchScraper",
+    "find_chromedriver_path",
 ]

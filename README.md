@@ -6,7 +6,7 @@
 
 # headless-driver
 
-Lightweight Python pacakge to manage Selenium WebDriver in headless mode with proxy support, stealth tweaks, auto-driver installation, multi-driver management, download handling, and advanced search-scraping utilities
+Lightweight Python package to manage Selenium WebDriver in headless mode with proxy support, stealth tweaks, auto-driver installation, multi-driver management, download handling, and advanced search-scraping utilities
 
 <center>
 <img src="https://raw.githubusercontent.com/nuhmanpk/headless-driver/main/images/logo.png" />
@@ -146,16 +146,22 @@ mgr.quit_all()
 ```python
 from headless import AdvancedSearchScraper
 
+# search_engine: "duckduckgo" (default), "bing" or "google"
 scr = AdvancedSearchScraper(headless_options={"headless": True}, max_results=5)
 
 res = scr.search("python headless")
 
 batch = scr.search_batch(["python headless", "selenium stealth"], max_workers=2)
 
-scr.export("results.json")
+scr.export("results.json")   # .json and .csv are supported
 scr.quit()
 
 ```
+
+Search engines defend aggressively against automation. When one serves a bot
+check instead of results, `search()` reports the block and returns an empty
+list; Google does this to headless browsers on most networks.
+
 
 
 ## API Documentation
@@ -168,9 +174,10 @@ Headless(
     window_size: Tuple[int, int] = (1920, 1080),
     user_agent: Optional[str] = None,
     headless: bool = True,
-    chrome_driver_path: Optional[str] = '/opt/homebrew/bin/chromedriver',
+    chrome_driver_path: Optional[str] = None,
     additional_args: Optional[List[str]] = None,
     remote_url: Optional[str] = None,
+    verbose: bool = False,
 )
 ```
 
@@ -178,9 +185,12 @@ Headless(
 - `window_size`: Browser window size (default: 1920x1080)
 - `user_agent`: Custom user agent string
 - `headless`: Run Chrome in headless mode (default: True)
-- `chrome_driver_path`: Path to chromedriver executable
+- `chrome_driver_path`: Path to chromedriver executable. When omitted, one is
+  auto-detected on PATH and common install locations; if that driver turns out
+  to mismatch the installed Chrome, a matching one is downloaded automatically
 - `additional_args`: List of extra Chrome arguments
 - `remote_url`: Use remote Selenium server if provided
+- `verbose`: Print driver setup and teardown diagnostics
 
 ### Methods
 - `get_driver()`: Returns a Selenium WebDriver instance
