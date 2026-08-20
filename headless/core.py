@@ -10,6 +10,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.remote.webdriver import WebDriver
 from selenium.common.exceptions import WebDriverException, SessionNotCreatedException
+from .ui import diag
 
 
 def install_chromedriver() -> Optional[str]:
@@ -22,6 +23,38 @@ def install_chromedriver() -> Optional[str]:
     except ImportError:
         return None
     return ChromeDriverManager().install()
+
+
+def find_chrome_binary() -> Optional[str]:
+    """Locate the installed Chrome/Chromium executable, or None."""
+    system = platform.system().lower()
+    candidates = [
+        shutil.which("google-chrome"),
+        shutil.which("chromium"),
+        shutil.which("chromium-browser"),
+        shutil.which("chrome"),
+    ]
+    if system == "darwin":
+        candidates += [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ]
+    elif system == "linux":
+        candidates += [
+            "/usr/bin/google-chrome",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/snap/bin/chromium",
+        ]
+    elif system == "windows":
+        candidates += [
+            "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+        ]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return None
 
 
 def find_chromedriver_path() -> Optional[str]:
@@ -97,17 +130,17 @@ class Headless:
         self.page_load_timeout = page_load_timeout
         self._driver: Optional[WebDriver] = None
         if self.verbose:
-            print(f"[Headless] Initialized with user_data_dir={self.user_data_dir}, window_size={self.window_size}, headless={self.headless}")
+            diag(f"[Headless] Initialized with user_data_dir={self.user_data_dir}, window_size={self.window_size}, headless={self.headless}")
 
     def _build_options(self) -> Options:
         if self.verbose:
-            print("[Headless] Building Chrome options...")
+            diag("[Headless] Building Chrome options...")
         opts = Options()
         opts.add_argument(f"--user-data-dir={self.user_data_dir}")
         if self.headless:
             opts.add_argument("--headless=new")
             if self.verbose:
-                print("[Headless] Headless mode enabled.")
+                diag("[Headless] Headless mode enabled.")
         opts.add_argument(f"--window-size={self.window_size[0]},{self.window_size[1]}")
         opts.add_argument("--disable-gpu")
         opts.add_argument("--no-sandbox")
@@ -116,27 +149,27 @@ class Headless:
         for arg in self.additional_args:
             opts.add_argument(arg)
             if self.verbose:
-                print(f"[Headless] Additional Chrome arg: {arg}")
+                diag(f"[Headless] Additional Chrome arg: {arg}")
         return opts
 
     def get_driver(self) -> WebDriver:
         if self._driver:
             if self.verbose:
-                print("[Headless] Returning cached WebDriver instance.")
+                diag("[Headless] Returning cached WebDriver instance.")
             return self._driver
 
         opts = self._build_options()
         try:
             if self.remote_url:
                 if self.verbose:
-                    print(f"[Headless] Connecting to remote WebDriver at {self.remote_url}")
+                    diag(f"[Headless] Connecting to remote WebDriver at {self.remote_url}")
                 self._driver = webdriver.Remote(
                     command_executor=self.remote_url,
                     options=opts
                 )
             elif self.chrome_driver_path:
                 if self.verbose:
-                    print(f"[Headless] Using ChromeDriver at {self.chrome_driver_path}")
+                    diag(f"[Headless] Using ChromeDriver at {self.chrome_driver_path}")
                 try:
                     service = Service(executable_path=self.chrome_driver_path)
                     self._driver = webdriver.Chrome(service=service, options=opts)
@@ -153,7 +186,7 @@ class Headless:
                             replacement = None
                     if not replacement or replacement == self.chrome_driver_path:
                         raise
-                    print(
+                    diag(
                         f"ChromeDriver at {self.chrome_driver_path} is incompatible with "
                         f"the installed Chrome; using {replacement} instead."
                     )
@@ -164,21 +197,21 @@ class Headless:
                     )
             else:
                 if self.verbose:
-                    print("[Headless] Using default ChromeDriver (Selenium Manager).")
+                    diag("[Headless] Using default ChromeDriver (Selenium Manager).")
                 self._driver = webdriver.Chrome(options=opts)
             self._apply_timeouts(self._driver)
             if self.verbose:
-                print("[Headless] WebDriver started successfully.")
+                diag("[Headless] WebDriver started successfully.")
         except Exception as e:
             import traceback
             if self.verbose:
-                print(f"[Headless] WebDriver startup failed: {e}")
+                diag(f"[Headless] WebDriver startup failed: {e}")
             if isinstance(e, SessionNotCreatedException):
-                print("Error: ChromeDriver and Chrome browser versions are incompatible. Please update ChromeDriver to match your browser version.")
+                diag("Error: ChromeDriver and Chrome browser versions are incompatible. Please update ChromeDriver to match your browser version.")
             elif isinstance(e, WebDriverException):
-                print(f"WebDriver error: {e}")
+                diag(f"WebDriver error: {e}")
             else:
-                print(f"Failed to start Chrome WebDriver: {e}\n{traceback.format_exc()}")
+                diag(f"Failed to start Chrome WebDriver: {e}\n{traceback.format_exc()}")
             self._driver = None
             raise
         return self._driver
@@ -192,34 +225,34 @@ class Headless:
         except WebDriverException:
             # Not fatal: the driver just keeps its own default timeouts.
             if self.verbose:
-                print("[Headless] Could not set page load timeout.")
+                diag("[Headless] Could not set page load timeout.")
 
     def quit(self) -> None:
         if self._driver:
             if self.verbose:
-                print("[Headless] Quitting WebDriver...")
+                diag("[Headless] Quitting WebDriver...")
             try:
                 self._driver.quit()
                 if self.verbose:
-                    print("[Headless] WebDriver quit successfully.")
+                    diag("[Headless] WebDriver quit successfully.")
             except Exception as e:
-                print(f"Error quitting WebDriver: {e}")
+                diag(f"Error quitting WebDriver: {e}")
             finally:
                 self._driver = None
 
         if getattr(self, "_cleanup_dir", False) and os.path.isdir(self.user_data_dir):
             if self.verbose:
-                print(f"[Headless] Cleaning up user data directory: {self.user_data_dir}")
+                diag(f"[Headless] Cleaning up user data directory: {self.user_data_dir}")
             try:
                 shutil.rmtree(self.user_data_dir, ignore_errors=True)
                 if self.verbose:
-                    print("[Headless] User data directory cleaned up.")
+                    diag("[Headless] User data directory cleaned up.")
             except Exception as e:
-                print(f"Error cleaning up user data directory: {e}")
+                diag(f"Error cleaning up user data directory: {e}")
 
     def __enter__(self) -> WebDriver:
         if self.verbose:
-            print("[Headless] Entering context manager.")
+            diag("[Headless] Entering context manager.")
         try:
             return self.get_driver()
         except Exception:
@@ -229,11 +262,11 @@ class Headless:
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         if self.verbose:
-            print("[Headless] Exiting context manager.")
+            diag("[Headless] Exiting context manager.")
         try:
             self.quit()
         except Exception as e:
-            print(f"Error exiting context: {e}")
+            diag(f"Error exiting context: {e}")
 
 
 class SearchScraper:
@@ -300,18 +333,18 @@ class SearchScraper:
 
     def search(self, query: str, max_results: Optional[int] = None) -> List[Dict]:
         if self.verbose:
-            print(f"[SearchScraper] Searching for: {query}")
+            diag(f"[SearchScraper] Searching for: {query}")
         items = self._scraper.search(query, max_results)
         results = [self.result_processor(i["url"], i["snippet"]) for i in items]
         self.results.extend(results)
         if self.verbose:
-            print(f"[SearchScraper] Returning {len(results)} results "
+            diag(f"[SearchScraper] Returning {len(results)} results "
                   f"from {self._scraper.last_engine}.")
         return results
 
     def quit(self) -> None:
         if self.verbose:
-            print("[SearchScraper] Quitting driver...")
+            diag("[SearchScraper] Quitting driver...")
         self._scraper.quit()
 
     def __enter__(self) -> "SearchScraper":

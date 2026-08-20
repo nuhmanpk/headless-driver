@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "headless-driver"
-version = "0.2.1"
-description = "Lightweight Python library to manage Selenium Chrome WebDriver in headless mode with proxy, stealth, auto-driver installation, multi-driver management, download handling, and advanced search scraping utilities."
+version = "0.2.2"
+description = "Headless Chrome automation and multi-engine search scraper - DuckDuckGo, Bing, Google and more with automatic fallback, proxy, stealth, screenshots, PDF export and a CLI."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -21,7 +21,10 @@ dependencies = [
 
 classifiers = [
   "Development Status :: 4 - Beta",
+  "Environment :: Console",
   "Intended Audience :: Developers",
+  "Intended Audience :: Information Technology",
+  "Intended Audience :: Science/Research",
   "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
@@ -29,15 +32,41 @@ classifiers = [
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Software Development :: Libraries",
-  "Topic :: Internet :: WWW/HTTP :: Browsers"
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Topic :: Software Development :: Testing",
+  "Topic :: Internet :: WWW/HTTP :: Browsers",
+  "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+  "Topic :: Text Processing :: Indexing",
+  "Topic :: Utilities"
 ]
 
-keywords = ["selenium", "headless", "chrome", "webdriver", "scraper", "automation"]
+keywords = [
+  "search-scraper", "search-engine-scraper", "search-scraping", "serp",
+  "serp-scraper", "search-results", "web-scraping", "scraper", "scraping",
+  "duckduckgo", "bing", "google-search", "mojeek", "startpage", "yandex",
+  "selenium", "headless", "headless-browser", "headless-chrome", "chrome",
+  "chromium", "webdriver", "chromedriver", "browser-automation", "automation",
+  "screenshot", "pdf-export", "stealth", "anti-detection", "proxy", "crawler",
+  "cli",
+]
+
+[project.optional-dependencies]
+# Tooling for building and validating a release, not needed at runtime:
+#   pip install -e ".[dev]"
+dev = [
+  "build>=1.0",
+  "twine>=5.0",
+  "trove-classifiers",
+]
+
+[project.scripts]
+headless-driver = "headless.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/nuhmanpk/headless-driver"
-Documentation = "https://github.com/nuhmanpk/headless-driver/wiki"
+Documentation = "https://github.com/nuhmanpk/headless-driver/blob/main/DOCS.md"
 Source = "https://github.com/nuhmanpk/headless-driver"
 Issues = "https://github.com/nuhmanpk/headless-driver/issues"
 

@@ -4,6 +4,7 @@ from typing import Optional, Dict
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.remote.webdriver import WebDriver
 from .core import Headless as CoreHeadless, find_chromedriver_path, install_chromedriver
+from .ui import diag
 
 
 class ExtendedHeadless(CoreHeadless):
@@ -38,7 +39,7 @@ class ExtendedHeadless(CoreHeadless):
 
     def _build_options(self) -> Options:
         if self.verbose:
-            print("[ExtendedHeadless] Building Chrome options...")
+            diag("[ExtendedHeadless] Building Chrome options...")
         # Build on top of the base options so user_data_dir, window_size,
         # user_agent, additional_args and the `headless` flag are honoured.
         opts = super()._build_options()
@@ -46,7 +47,7 @@ class ExtendedHeadless(CoreHeadless):
         if self.proxy:
             opts.add_argument(f"--proxy-server={self.proxy}")
             if self.verbose:
-                print(f"[ExtendedHeadless] Proxy set: {self.proxy}")
+                diag(f"[ExtendedHeadless] Proxy set: {self.proxy}")
 
         if self.download_dir:
             os.makedirs(self.download_dir, exist_ok=True)
@@ -58,14 +59,14 @@ class ExtendedHeadless(CoreHeadless):
             }
             opts.add_experimental_option("prefs", prefs)
             if self.verbose:
-                print(f"[ExtendedHeadless] Download directory set: {self.download_dir}")
+                diag(f"[ExtendedHeadless] Download directory set: {self.download_dir}")
 
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
 
         if self.chrome_binary_path and os.path.exists(self.chrome_binary_path):
             opts.binary_location = self.chrome_binary_path
             if self.verbose:
-                print(f"[ExtendedHeadless] Chrome binary location set: {self.chrome_binary_path}")
+                diag(f"[ExtendedHeadless] Chrome binary location set: {self.chrome_binary_path}")
 
         return opts
 
@@ -80,14 +81,14 @@ class ExtendedHeadless(CoreHeadless):
             return
         if self.auto_install:
             if self.verbose:
-                print("[ExtendedHeadless] Auto-installing ChromeDriver...")
+                diag("[ExtendedHeadless] Auto-installing ChromeDriver...")
             try:
                 self.chrome_driver_path = install_chromedriver()
                 if self.verbose:
-                    print(f"[ExtendedHeadless] ChromeDriver installed at: {self.chrome_driver_path}")
+                    diag(f"[ExtendedHeadless] ChromeDriver installed at: {self.chrome_driver_path}")
             except Exception as e:
                 if self.verbose:
-                    print(f"[ExtendedHeadless] ChromeDriver auto-install failed: {e}")
+                    diag(f"[ExtendedHeadless] ChromeDriver auto-install failed: {e}")
         if not self.chrome_driver_path:
             # Leaving this unset lets Selenium Manager resolve a driver itself.
             self.chrome_driver_path = find_chromedriver_path()
@@ -95,23 +96,23 @@ class ExtendedHeadless(CoreHeadless):
     def get_driver(self) -> WebDriver:
         if self._driver:
             if self.verbose:
-                print("[ExtendedHeadless] Returning cached WebDriver instance.")
+                diag("[ExtendedHeadless] Returning cached WebDriver instance.")
             return self._driver
 
         if self.verbose:
-            print("[ExtendedHeadless] Getting Chrome WebDriver...")
+            diag("[ExtendedHeadless] Getting Chrome WebDriver...")
         self._auto_install_driver()
         driver = super().get_driver()
         self._apply_stealth(driver)
         if self.verbose:
-            print("[ExtendedHeadless] WebDriver ready.")
+            diag("[ExtendedHeadless] WebDriver ready.")
         return driver
 
     def _apply_stealth(self, driver: WebDriver) -> None:
         if not (driver and self.stealth) or self._applied_stealth:
             return
         if self.verbose:
-            print("[ExtendedHeadless] Applying stealth options...")
+            diag("[ExtendedHeadless] Applying stealth options...")
         try:
             from selenium_stealth import stealth as apply_stealth
             apply_stealth(
@@ -125,7 +126,7 @@ class ExtendedHeadless(CoreHeadless):
             )
             self._applied_stealth = True
             if self.verbose:
-                print("[ExtendedHeadless] Stealth applied via selenium-stealth.")
+                diag("[ExtendedHeadless] Stealth applied via selenium-stealth.")
         except Exception:
             try:
                 driver.execute_cdp_cmd(
@@ -136,10 +137,10 @@ class ExtendedHeadless(CoreHeadless):
                 )
                 self._applied_stealth = True
                 if self.verbose:
-                    print("[ExtendedHeadless] Stealth applied via CDP script.")
+                    diag("[ExtendedHeadless] Stealth applied via CDP script.")
             except Exception as e:
                 if self.verbose:
-                    print(f"[ExtendedHeadless] Stealth application failed: {e}")
+                    diag(f"[ExtendedHeadless] Stealth application failed: {e}")
 
     def quit(self) -> None:
         super().quit()
@@ -148,12 +149,12 @@ class ExtendedHeadless(CoreHeadless):
 
     def screenshot(self, path: str) -> bool:
         if self.verbose:
-            print(f"[ExtendedHeadless] Taking screenshot: {path}")
+            diag(f"[ExtendedHeadless] Taking screenshot: {path}")
         try:
             d = self.get_driver()
         except Exception as e:
             if self.verbose:
-                print(f"[ExtendedHeadless] WebDriver not available for screenshot: {e}")
+                diag(f"[ExtendedHeadless] WebDriver not available for screenshot: {e}")
             return False
         try:
             parent = os.path.dirname(os.path.abspath(path))
@@ -161,28 +162,28 @@ class ExtendedHeadless(CoreHeadless):
                 os.makedirs(parent, exist_ok=True)
             result = bool(d.save_screenshot(path))
             if self.verbose:
-                print(f"[ExtendedHeadless] Screenshot saved: {path}")
+                diag(f"[ExtendedHeadless] Screenshot saved: {path}")
             return result
         except Exception as e:
             if self.verbose:
-                print(f"[ExtendedHeadless] Screenshot failed: {e}")
+                diag(f"[ExtendedHeadless] Screenshot failed: {e}")
             return False
 
     def save_pdf(self, path: str, print_background: bool = True) -> bool:
         if self.verbose:
-            print(f"[ExtendedHeadless] Saving PDF: {path}")
+            diag(f"[ExtendedHeadless] Saving PDF: {path}")
         try:
             d = self.get_driver()
         except Exception as e:
             if self.verbose:
-                print(f"[ExtendedHeadless] WebDriver not available for PDF: {e}")
+                diag(f"[ExtendedHeadless] WebDriver not available for PDF: {e}")
             return False
         try:
             result = d.execute_cdp_cmd("Page.printToPDF", {"printBackground": print_background})
             encoded = result.get("data") if isinstance(result, dict) else None
             if not encoded:
                 if self.verbose:
-                    print("[ExtendedHeadless] Page.printToPDF returned no data.")
+                    diag("[ExtendedHeadless] Page.printToPDF returned no data.")
                 return False
             data = base64.b64decode(encoded)
             parent = os.path.dirname(os.path.abspath(path))
@@ -191,11 +192,11 @@ class ExtendedHeadless(CoreHeadless):
             with open(path, "wb") as f:
                 f.write(data)
             if self.verbose:
-                print(f"[ExtendedHeadless] PDF saved: {path}")
+                diag(f"[ExtendedHeadless] PDF saved: {path}")
             return True
         except Exception as e:
             if self.verbose:
-                print(f"[ExtendedHeadless] PDF save failed: {e}")
+                diag(f"[ExtendedHeadless] PDF save failed: {e}")
             return False
 
 
@@ -220,7 +221,7 @@ class MultiDriverManager:
         if verbose is None:
             verbose = self.verbose
         if self.verbose:
-            print(f"[MultiDriverManager] Creating instance '{name}'...")
+            diag(f"[MultiDriverManager] Creating instance '{name}'...")
         # Replacing a name must not orphan the browser it was bound to.
         if name in self.instances:
             self.quit(name)
@@ -237,33 +238,33 @@ class MultiDriverManager:
         )
         self.instances[name] = inst
         if self.verbose:
-            print(f"[MultiDriverManager] Instance '{name}' created.")
+            diag(f"[MultiDriverManager] Instance '{name}' created.")
         return inst
 
     def get(self, name: str) -> Optional[ExtendedHeadless]:
         if self.verbose:
-            print(f"[MultiDriverManager] Getting instance '{name}'...")
+            diag(f"[MultiDriverManager] Getting instance '{name}'...")
         return self.instances.get(name)
 
     def quit(self, name: str) -> None:
         if self.verbose:
-            print(f"[MultiDriverManager] Quitting instance '{name}'...")
+            diag(f"[MultiDriverManager] Quitting instance '{name}'...")
         inst = self.instances.pop(name, None)
         if inst:
             try:
                 inst.quit()
             except Exception as e:
-                print(f"Error quitting instance '{name}': {e}")
+                diag(f"Error quitting instance '{name}': {e}")
             if self.verbose:
-                print(f"[MultiDriverManager] Instance '{name}' quit.")
+                diag(f"[MultiDriverManager] Instance '{name}' quit.")
 
     def quit_all(self) -> None:
         if self.verbose:
-            print("[MultiDriverManager] Quitting all instances...")
+            diag("[MultiDriverManager] Quitting all instances...")
         for k in list(self.instances.keys()):
             self.quit(k)
         if self.verbose:
-            print("[MultiDriverManager] All instances quit.")
+            diag("[MultiDriverManager] All instances quit.")
 
     def __enter__(self) -> "MultiDriverManager":
         return self

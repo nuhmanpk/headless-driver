@@ -10,6 +10,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.support import expected_conditions as EC
 from .core import Headless
+from .ui import diag
 
 # Per-engine result container, link, title and snippet selectors.
 #
@@ -314,7 +315,7 @@ class AdvancedSearchScraper:
 
     def _log(self, message: str) -> None:
         if self.verbose:
-            print(f"[AdvancedSearchScraper] {message}")
+            diag(f"[AdvancedSearchScraper] {message}")
 
     def _search_one(self, d, engine: str, query: str, limit: int) -> List[Dict]:
         """Scrape a single engine. Returns [] when blocked, slow or empty."""
@@ -393,7 +394,7 @@ class AdvancedSearchScraper:
                     self.results.extend(extracted)
                     self._log(f"{len(extracted)} results from {name}")
                     return extracted
-            print(
+            diag(
                 f"No results for query: {query} "
                 f"(tried {', '.join(order)})"
             )
@@ -452,7 +453,7 @@ class AdvancedSearchScraper:
             try:
                 self._driver_context.quit()
             except Exception as e:
-                print(f"Error quitting driver: {e}")
+                diag(f"Error quitting driver: {e}")
             self._driver_context = None
             self.driver = None
         elif self.driver:

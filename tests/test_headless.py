@@ -67,12 +67,28 @@ def chrome_available() -> bool:
         return False
 
 
-def network_available() -> bool:
-    try:
-        socket.create_connection(("html.duckduckgo.com", 443), timeout=5).close()
-        return True
-    except OSError:
+def live_tests_enabled() -> bool:
+    """Live engine tests are opt-out, because CI addresses get CAPTCHA'd.
+
+    A blocked engine is a legitimate response, not a bug, so in an environment
+    where every engine blocks us these tests would fail without anything being
+    broken. CI sets SKIP_LIVE_TESTS=1; developers get them by default.
+    """
+    if os.environ.get("SKIP_LIVE_TESTS"):
         return False
+    return network_available()
+
+
+def network_available() -> bool:
+    # Try more than one host: a single blip should not silently skip the live
+    # tests and make a broken search look like a passing suite.
+    for host in ("html.duckduckgo.com", "www.bing.com", "duckduckgo.com"):
+        try:
+            socket.create_connection((host, 443), timeout=10).close()
+            return True
+        except OSError:
+            continue
+    return False
 
 
 class TestEngineRegistry(unittest.TestCase):
@@ -439,8 +455,9 @@ class TestBrowserLifecycle(unittest.TestCase):
             mgr.quit_all()
 
 
-@unittest.skipUnless(chrome_available() and network_available(),
-                     "needs a chromedriver and internet access")
+@unittest.skipUnless(chrome_available() and live_tests_enabled(),
+                     "needs a chromedriver and internet access "
+                     "(set SKIP_LIVE_TESTS=1 to skip deliberately)")
 class TestLiveSearch(unittest.TestCase):
     """End-to-end against the real engines."""
 

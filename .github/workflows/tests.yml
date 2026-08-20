@@ -1,0 +1,38 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Run tests
+        # Live engine tests are skipped: search engines serve CAPTCHAs to CI
+        # addresses, so a block there would fail the build without anything
+        # being broken. Everything else runs, including the browser-driven
+        # tests, which use local HTML fixtures rather than the network.
+        env:
+          SKIP_LIVE_TESTS: "1"
+        run: python -m unittest discover -s tests -v
