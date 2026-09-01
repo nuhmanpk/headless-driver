@@ -45,13 +45,19 @@ multi-driver management, and a colourful CLI.
 - Download folder management
 - Multi-driver manager for many isolated browser instances
 - Search scraping across 8 engines, starting with DuckDuckGo's no-JavaScript endpoint and falling back automatically when one blocks you
+- **Tells you when you were blocked** — "nobody has an answer" and "everybody refused me" are different results, not both an empty list
+- **Browserless mode** — server-rendered engines fetched over HTTP: sub-second instead of seconds, megabytes instead of a gigabyte, and thread-safe
+- `ScraperPool` for genuinely parallel searching, one browser per worker
+- Standard `logging` throughout: silent until your application asks
 - Bounded page-load timeouts, so a stalled engine fails over instead of hanging
 - A `headless-driver` CLI with coloured output, `--json` for piping, and a `doctor` command that diagnoses your setup
+- Colour everywhere it makes sense — macOS, Linux, Windows consoles and CI log viewers — with no extra dependency, degrading to plain ASCII when it does not
 
 ## Install
 
 ```bash
-pip install headless-driver
+pip install headless-driver              # browser only
+pip install "headless-driver[http]"      # recommended: adds browserless mode
 ```
 
 Needs Python 3.9+ and an installed Chrome or Chromium. A matching ChromeDriver
@@ -73,15 +79,35 @@ with Headless() as driver:
     print(driver.title)
 ```
 
-Search the web:
+Search the web — no browser needed for most engines:
 
 ```python
 from headless import AdvancedSearchScraper
 
 with AdvancedSearchScraper(max_results=5) as scraper:
-    for item in scraper.search("python headless browser"):
+    response = scraper.search("python headless browser")
+
+    for item in response:                 # iterates like a list
         print(item["title"], item["url"])
-    print("answered by", scraper.last_engine)
+
+    print("answered by", response.engine)
+    if response.blocked:                  # every engine refused, not "no results"
+        print("blocked:", [a.reason for a in response.refused])
+```
+
+Being told you were blocked is the difference between backing off and recording
+a false negative. Engines CAPTCHA cloud address ranges, so the same code that
+works on a laptop returns nothing from ECS — `response.blocked` says which
+happened.
+
+Search in parallel:
+
+```python
+from headless import ScraperPool
+
+with ScraperPool(size=4) as pool:
+    for query, response in pool.map(["python asyncio", "python typing"]):
+        print(query, response.engine, len(response))
 ```
 
 Screenshot and PDF:
@@ -103,8 +129,10 @@ hl.quit()
 ```bash
 headless-driver search "python headless browser" -n 5
 headless-driver search "selenium stealth" --json | jq -r '.results[].url'
-headless-driver engines                    # engine list and fallback order
+headless-driver search "python" --transport http   # no browser at all
+headless-driver engines                    # engines, capabilities, fallback order
 headless-driver doctor                     # check chrome, driver, connectivity
+headless-driver doctor --engines           # check the engines still parse
 headless-driver shot https://example.com -o page.png --window 1280x720
 headless-driver pdf  https://example.com -o page.pdf
 ```
@@ -157,9 +185,22 @@ Add your own engine with `register_engine()`. Full details, including the result
 dict and redirect handling, are in
 [DOCS.md](DOCS.md#search-engines).
 
+Each engine declares what it can do — whether it needs a browser (`js`) and
+whether it returns description text (`snippets`) — so you do not have to
+discover it by observation:
+
+```python
+scraper.capabilities("duckduckgo_lite")
+# {"js": False, "snippets": False, ...}   -> fast, but match on titles
+```
+
 ## More
 
 - [Full documentation](DOCS.md) — every class, argument and CLI flag
+- [Changelog](CHANGELOG.md) — what changed in 1.0, and the two breaking changes
+- [Search results](DOCS.md#search-results) — `SearchResponse`, `blocked`, per-engine attempts
+- [Transports](DOCS.md#transports-and-browserless-mode) — running without Chrome
+- [Deployment](DOCS.md#deployment) — the Dockerfile, and skipping Chrome entirely
 - [Python API](DOCS.md#python-api) — `Headless`, `ExtendedHeadless`, `MultiDriverManager`, `AdvancedSearchScraper`, `SearchScraper`
 - [Timeouts](DOCS.md#timeouts) and [troubleshooting](DOCS.md#troubleshooting)
 - [Running the tests](DOCS.md#running-the-tests)

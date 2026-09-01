@@ -3,8 +3,11 @@ import base64
 from typing import Optional, Dict
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.remote.webdriver import WebDriver
-from .core import Headless as CoreHeadless, find_chromedriver_path, install_chromedriver
-from .ui import diag
+from .core import (Headless as CoreHeadless, find_chromedriver_path,
+                   install_chromedriver, find_chrome_binary)
+from .logs import get_logger, enable_console_logging
+
+log = get_logger("manager")
 
 
 class ExtendedHeadless(CoreHeadless):
@@ -16,11 +19,13 @@ class ExtendedHeadless(CoreHeadless):
         auto_install: bool = True,
         profile_dir: Optional[str] = None,
         chrome_driver_path: Optional[str] = None,
-        chrome_binary_path: Optional[str] = "/usr/bin/chromium-browser",
+        chrome_binary_path: Optional[str] = None,
         verbose: bool = False,
         *args,
         **kwargs,
     ):
+        if verbose:
+            enable_console_logging()
         if profile_dir:
             kwargs["user_data_dir"] = profile_dir
         kwargs["chrome_driver_path"] = chrome_driver_path
@@ -34,12 +39,14 @@ class ExtendedHeadless(CoreHeadless):
         self.stealth = stealth
         self.download_dir = download_dir
         self.auto_install = auto_install
-        self.chrome_binary_path = chrome_binary_path
+        # None means "detect it": a Linux-only path is not an honest default
+        # for a cross-platform API.
+        self.chrome_binary_path = chrome_binary_path or find_chrome_binary()
         self._applied_stealth = False
 
     def _build_options(self) -> Options:
         if self.verbose:
-            diag("[ExtendedHeadless] Building Chrome options...")
+            log.debug("[ExtendedHeadless] Building Chrome options...")
         # Build on top of the base options so user_data_dir, window_size,
         # user_agent, additional_args and the `headless` flag are honoured.
         opts = super()._build_options()
@@ -47,7 +54,7 @@ class ExtendedHeadless(CoreHeadless):
         if self.proxy:
             opts.add_argument(f"--proxy-server={self.proxy}")
             if self.verbose:
-                diag(f"[ExtendedHeadless] Proxy set: {self.proxy}")
+                log.debug(f"[ExtendedHeadless] Proxy set: {self.proxy}")
 
         if self.download_dir:
             os.makedirs(self.download_dir, exist_ok=True)
@@ -59,14 +66,14 @@ class ExtendedHeadless(CoreHeadless):
             }
             opts.add_experimental_option("prefs", prefs)
             if self.verbose:
-                diag(f"[ExtendedHeadless] Download directory set: {self.download_dir}")
+                log.debug(f"[ExtendedHeadless] Download directory set: {self.download_dir}")
 
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
 
         if self.chrome_binary_path and os.path.exists(self.chrome_binary_path):
             opts.binary_location = self.chrome_binary_path
             if self.verbose:
-                diag(f"[ExtendedHeadless] Chrome binary location set: {self.chrome_binary_path}")
+                log.debug(f"[ExtendedHeadless] Chrome binary location set: {self.chrome_binary_path}")
 
         return opts
 
@@ -81,14 +88,14 @@ class ExtendedHeadless(CoreHeadless):
             return
         if self.auto_install:
             if self.verbose:
-                diag("[ExtendedHeadless] Auto-installing ChromeDriver...")
+                log.debug("[ExtendedHeadless] Auto-installing ChromeDriver...")
             try:
                 self.chrome_driver_path = install_chromedriver()
                 if self.verbose:
-                    diag(f"[ExtendedHeadless] ChromeDriver installed at: {self.chrome_driver_path}")
+                    log.debug(f"[ExtendedHeadless] ChromeDriver installed at: {self.chrome_driver_path}")
             except Exception as e:
                 if self.verbose:
-                    diag(f"[ExtendedHeadless] ChromeDriver auto-install failed: {e}")
+                    log.debug(f"[ExtendedHeadless] ChromeDriver auto-install failed: {e}")
         if not self.chrome_driver_path:
             # Leaving this unset lets Selenium Manager resolve a driver itself.
             self.chrome_driver_path = find_chromedriver_path()
@@ -96,23 +103,23 @@ class ExtendedHeadless(CoreHeadless):
     def get_driver(self) -> WebDriver:
         if self._driver:
             if self.verbose:
-                diag("[ExtendedHeadless] Returning cached WebDriver instance.")
+                log.debug("[ExtendedHeadless] Returning cached WebDriver instance.")
             return self._driver
 
         if self.verbose:
-            diag("[ExtendedHeadless] Getting Chrome WebDriver...")
+            log.debug("[ExtendedHeadless] Getting Chrome WebDriver...")
         self._auto_install_driver()
         driver = super().get_driver()
         self._apply_stealth(driver)
         if self.verbose:
-            diag("[ExtendedHeadless] WebDriver ready.")
+            log.debug("[ExtendedHeadless] WebDriver ready.")
         return driver
 
     def _apply_stealth(self, driver: WebDriver) -> None:
         if not (driver and self.stealth) or self._applied_stealth:
             return
         if self.verbose:
-            diag("[ExtendedHeadless] Applying stealth options...")
+            log.debug("[ExtendedHeadless] Applying stealth options...")
         try:
             from selenium_stealth import stealth as apply_stealth
             apply_stealth(
@@ -126,7 +133,7 @@ class ExtendedHeadless(CoreHeadless):
             )
             self._applied_stealth = True
             if self.verbose:
-                diag("[ExtendedHeadless] Stealth applied via selenium-stealth.")
+                log.debug("[ExtendedHeadless] Stealth applied via selenium-stealth.")
         except Exception:
             try:
                 driver.execute_cdp_cmd(
@@ -137,10 +144,10 @@ class ExtendedHeadless(CoreHeadless):
                 )
                 self._applied_stealth = True
                 if self.verbose:
-                    diag("[ExtendedHeadless] Stealth applied via CDP script.")
+                    log.debug("[ExtendedHeadless] Stealth applied via CDP script.")
             except Exception as e:
                 if self.verbose:
-                    diag(f"[ExtendedHeadless] Stealth application failed: {e}")
+                    log.debug(f"[ExtendedHeadless] Stealth application failed: {e}")
 
     def quit(self) -> None:
         super().quit()
@@ -149,12 +156,12 @@ class ExtendedHeadless(CoreHeadless):
 
     def screenshot(self, path: str) -> bool:
         if self.verbose:
-            diag(f"[ExtendedHeadless] Taking screenshot: {path}")
+            log.debug(f"[ExtendedHeadless] Taking screenshot: {path}")
         try:
             d = self.get_driver()
         except Exception as e:
             if self.verbose:
-                diag(f"[ExtendedHeadless] WebDriver not available for screenshot: {e}")
+                log.debug(f"[ExtendedHeadless] WebDriver not available for screenshot: {e}")
             return False
         try:
             parent = os.path.dirname(os.path.abspath(path))
@@ -162,28 +169,28 @@ class ExtendedHeadless(CoreHeadless):
                 os.makedirs(parent, exist_ok=True)
             result = bool(d.save_screenshot(path))
             if self.verbose:
-                diag(f"[ExtendedHeadless] Screenshot saved: {path}")
+                log.debug(f"[ExtendedHeadless] Screenshot saved: {path}")
             return result
         except Exception as e:
             if self.verbose:
-                diag(f"[ExtendedHeadless] Screenshot failed: {e}")
+                log.debug(f"[ExtendedHeadless] Screenshot failed: {e}")
             return False
 
     def save_pdf(self, path: str, print_background: bool = True) -> bool:
         if self.verbose:
-            diag(f"[ExtendedHeadless] Saving PDF: {path}")
+            log.debug(f"[ExtendedHeadless] Saving PDF: {path}")
         try:
             d = self.get_driver()
         except Exception as e:
             if self.verbose:
-                diag(f"[ExtendedHeadless] WebDriver not available for PDF: {e}")
+                log.debug(f"[ExtendedHeadless] WebDriver not available for PDF: {e}")
             return False
         try:
             result = d.execute_cdp_cmd("Page.printToPDF", {"printBackground": print_background})
             encoded = result.get("data") if isinstance(result, dict) else None
             if not encoded:
                 if self.verbose:
-                    diag("[ExtendedHeadless] Page.printToPDF returned no data.")
+                    log.debug("[ExtendedHeadless] Page.printToPDF returned no data.")
                 return False
             data = base64.b64decode(encoded)
             parent = os.path.dirname(os.path.abspath(path))
@@ -192,11 +199,11 @@ class ExtendedHeadless(CoreHeadless):
             with open(path, "wb") as f:
                 f.write(data)
             if self.verbose:
-                diag(f"[ExtendedHeadless] PDF saved: {path}")
+                log.debug(f"[ExtendedHeadless] PDF saved: {path}")
             return True
         except Exception as e:
             if self.verbose:
-                diag(f"[ExtendedHeadless] PDF save failed: {e}")
+                log.debug(f"[ExtendedHeadless] PDF save failed: {e}")
             return False
 
 
@@ -214,14 +221,14 @@ class MultiDriverManager:
         auto_install: bool = True,
         profile_dir: Optional[str] = None,
         chrome_driver_path: Optional[str] = None,
-        chrome_binary_path: Optional[str] = "/usr/bin/chromium-browser",
+        chrome_binary_path: Optional[str] = None,
         verbose: Optional[bool] = None,
         **kwargs,
     ) -> ExtendedHeadless:
         if verbose is None:
             verbose = self.verbose
         if self.verbose:
-            diag(f"[MultiDriverManager] Creating instance '{name}'...")
+            log.debug(f"[MultiDriverManager] Creating instance '{name}'...")
         # Replacing a name must not orphan the browser it was bound to.
         if name in self.instances:
             self.quit(name)
@@ -238,33 +245,33 @@ class MultiDriverManager:
         )
         self.instances[name] = inst
         if self.verbose:
-            diag(f"[MultiDriverManager] Instance '{name}' created.")
+            log.debug(f"[MultiDriverManager] Instance '{name}' created.")
         return inst
 
     def get(self, name: str) -> Optional[ExtendedHeadless]:
         if self.verbose:
-            diag(f"[MultiDriverManager] Getting instance '{name}'...")
+            log.debug(f"[MultiDriverManager] Getting instance '{name}'...")
         return self.instances.get(name)
 
     def quit(self, name: str) -> None:
         if self.verbose:
-            diag(f"[MultiDriverManager] Quitting instance '{name}'...")
+            log.debug(f"[MultiDriverManager] Quitting instance '{name}'...")
         inst = self.instances.pop(name, None)
         if inst:
             try:
                 inst.quit()
             except Exception as e:
-                diag(f"Error quitting instance '{name}': {e}")
+                log.debug(f"Error quitting instance '{name}': {e}", "warn")
             if self.verbose:
-                diag(f"[MultiDriverManager] Instance '{name}' quit.")
+                log.debug("[MultiDriverManager] Instance %s quit.", name)
 
     def quit_all(self) -> None:
         if self.verbose:
-            diag("[MultiDriverManager] Quitting all instances...")
+            log.debug("[MultiDriverManager] Quitting all instances...")
         for k in list(self.instances.keys()):
             self.quit(k)
         if self.verbose:
-            diag("[MultiDriverManager] All instances quit.")
+            log.debug("[MultiDriverManager] All instances quit.")
 
     def __enter__(self) -> "MultiDriverManager":
         return self

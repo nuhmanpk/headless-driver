@@ -7,6 +7,7 @@ terminal, so piping to a file or another process yields plain text.
 """
 
 import os
+import re
 import sys
 import time
 import shutil
@@ -30,31 +31,95 @@ CODES = {
     "grey": "90",
 }
 
-SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+SPINNER_FRAMES = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
+
+# Continuous-integration systems whose log viewers render ANSI escapes. Their
+# output is not a TTY, so without this colour would be dropped there.
+_ANSI_CI_VARS = (
+    "GITHUB_ACTIONS",     # GitHub Actions
+    "GITLAB_CI",          # GitLab
+    "CIRCLECI",           # CircleCI
+    "TRAVIS",             # Travis
+    "BUILDKITE",          # Buildkite
+    "DRONE",              # Drone
+    "APPVEYOR",           # AppVeyor
+    "TEAMCITY_VERSION",   # TeamCity
+    "CODEBUILD_BUILD_ID",  # AWS CodeBuild
+    "AWS_EXECUTION_ENV",   # AWS CodePipeline / ECS / Lambda tooling
+)
+
+# Windows terminals that speak ANSI without needing the console mode changed.
+_WINDOWS_ANSI_VARS = ("WT_SESSION", "ANSICON", "ConEmuANSI", "TERM_PROGRAM")
+
+_ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+_windows_ansi_ready: Optional[bool] = None
 
 
-def diag(message: str) -> None:
-    """Write a library diagnostic to stderr.
+def enable_windows_ansi() -> bool:
+    """Turn on ANSI escape handling for the Windows console.
 
-    Diagnostics must never land on stdout: callers pipe stdout to consumers that
-    expect only real output (the CLI's ``--json`` mode, for one).
+    Windows 10 and later can interpret escape sequences, but only once
+    ENABLE_VIRTUAL_TERMINAL_PROCESSING is set on the console handle. Done with
+    ctypes so the package keeps no dependency on colorama. Returns True when
+    colour is usable; the result is computed once and cached.
     """
-    print(message, file=sys.stderr)
+    global _windows_ansi_ready
+    if _windows_ansi_ready is not None:
+        return _windows_ansi_ready
+    if os.name != "nt":
+        _windows_ansi_ready = True
+        return True
+    if any(os.environ.get(var) for var in _WINDOWS_ANSI_VARS):
+        _windows_ansi_ready = True
+        return True
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        ok = False
+        for handle_id in (-11, -12):  # STD_OUTPUT_HANDLE, STD_ERROR_HANDLE
+            handle = kernel32.GetStdHandle(handle_id)
+            if handle in (0, -1):
+                continue
+            mode = ctypes.c_uint32()
+            if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                continue
+            if mode.value & _ENABLE_VIRTUAL_TERMINAL_PROCESSING:
+                ok = True
+                continue
+            merged = mode.value | _ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            if kernel32.SetConsoleMode(handle, merged):
+                ok = True
+        _windows_ansi_ready = ok
+    except Exception:
+        # An old console, or a redirected handle: fall back to plain text.
+        _windows_ansi_ready = False
+    return _windows_ansi_ready
 
 
 def supports_color(stream=None) -> bool:
-    """Follow the informal NO_COLOR / FORCE_COLOR conventions."""
-    stream = stream or sys.stdout
+    """Decide whether `stream` can take ANSI colour.
+
+    Order of precedence: NO_COLOR, FORCE_COLOR, a dumb terminal, then whether
+    this is a terminal at all, and finally CI systems that render ANSI in their
+    log viewers.
+    """
+    stream = stream if stream is not None else sys.stdout
     if os.environ.get("NO_COLOR"):
         return False
-    if os.environ.get("FORCE_COLOR"):
+    forced = bool(os.environ.get("FORCE_COLOR"))
+    if os.environ.get("TERM") == "dumb" and not forced:
+        return False
+    if os.name == "nt" and not enable_windows_ansi() and not forced:
+        return False
+    if forced:
         return True
-    if os.environ.get("TERM") == "dumb":
-        return False
     try:
-        return bool(stream.isatty())
+        if stream.isatty():
+            return True
     except Exception:
-        return False
+        pass
+    return any(os.environ.get(var) for var in _ANSI_CI_VARS)
 
 
 def supports_unicode(stream=None) -> bool:
@@ -211,6 +276,61 @@ class Console:
 
     def spinner(self, label: str) -> "Spinner":
         return Spinner(self, label)
+
+
+# Colour and marker for each diagnostic level.
+LEVELS = {
+    "debug": ("grey", ""),
+    "info": ("grey", ""),
+    "success": ("green", "ok"),
+    "warn": ("yellow", "warn"),
+    "error": ("red", "fail"),
+}
+
+_TAG_RE = re.compile(r"^\[([^\]]+)\]\s*")
+
+
+def diag(message: str, level: str = "info", stream=None) -> None:
+    """Write a library diagnostic to stderr, coloured by level.
+
+    Diagnostics must never land on stdout: callers pipe stdout to consumers that
+    expect only real output (the CLI's ``--json`` mode, for one). Colour is
+    detected per call rather than cached, so changing NO_COLOR or redirecting
+    the stream takes effect immediately.
+    """
+    con = Console(stream=stream if stream is not None else sys.stderr)
+    colour, symbol = LEVELS.get(level, LEVELS["info"])
+
+    # A leading "[Component]" tag is dimmed so the message itself stands out.
+    tag = ""
+    match = _TAG_RE.match(message)
+    if match:
+        tag = con.style(f"[{match.group(1)}]", "cyan")
+        message = message[match.end():]
+
+    marker = con.style(con.sym(symbol), colour, "bold") if symbol else ""
+    body = con.style(message, colour)
+    con.write(" ".join(p for p in (marker, tag, body) if p))
+
+
+def debug(message: str) -> None:
+    diag(message, "debug")
+
+
+def info(message: str) -> None:
+    diag(message, "info")
+
+
+def success(message: str) -> None:
+    diag(message, "success")
+
+
+def warn(message: str) -> None:
+    diag(message, "warn")
+
+
+def error(message: str) -> None:
+    diag(message, "error")
 
 
 class Spinner:

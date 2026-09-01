@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "headless-driver"
-version = "0.2.2"
-description = "Headless Chrome automation and multi-engine search scraper - DuckDuckGo, Bing, Google and more with automatic fallback, proxy, stealth, screenshots, PDF export and a CLI."
+version = "1.0.0"
+description = "Headless Chrome automation and multi-engine search scraper - DuckDuckGo, Bing, Google and more with automatic fallback, block detection, optional browserless HTTP mode, proxy, stealth, screenshots, PDF export and a CLI."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
@@ -39,7 +39,8 @@ classifiers = [
   "Topic :: Internet :: WWW/HTTP :: Browsers",
   "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
   "Topic :: Text Processing :: Indexing",
-  "Topic :: Utilities"
+  "Topic :: Utilities",
+  "Typing :: Typed"
 ]
 
 keywords = [
@@ -55,10 +56,19 @@ keywords = [
 [project.optional-dependencies]
 # Tooling for building and validating a release, not needed at runtime:
 #   pip install -e ".[dev]"
+# Fetch server-rendered engines over HTTP instead of driving a browser:
+# much faster, far less memory, and thread-safe.
+#   pip install "headless-driver[http]"
+http = [
+  "requests>=2.31",
+  "beautifulsoup4>=4.12",
+]
 dev = [
   "build>=1.0",
   "twine>=5.0",
   "trove-classifiers",
+  "requests>=2.31",
+  "beautifulsoup4>=4.12",
 ]
 
 [project.scripts]
@@ -69,6 +79,9 @@ Homepage = "https://github.com/nuhmanpk/headless-driver"
 Documentation = "https://github.com/nuhmanpk/headless-driver/blob/main/DOCS.md"
 Source = "https://github.com/nuhmanpk/headless-driver"
 Issues = "https://github.com/nuhmanpk/headless-driver/issues"
+
+[tool.setuptools.package-data]
+headless = ["py.typed"]
 
 [tool.setuptools.packages.find]
 include = ["headless*"]

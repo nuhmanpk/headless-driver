@@ -57,14 +57,34 @@ EMPTY_HTML = "<html><body><p>No results.</p></body></html>"
 DDG_SPEC = ENGINE_SPECS["duckduckgo"]
 
 
+_browser_ok = None
+
+
 def chrome_available() -> bool:
-    if find_chromedriver_path():
-        return True
-    try:
-        from webdriver_manager.chrome import ChromeDriverManager  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    """Whether a browser can actually be started, not merely whether a driver
+    file exists. A driver that is present but unusable — a stale major version,
+    or a binary the OS refuses to execute — should skip these tests rather than
+    fail them, because nothing in this package is broken in that case.
+    """
+    global _browser_ok
+    if _browser_ok is None:
+        if not find_chromedriver_path():
+            try:
+                from webdriver_manager.chrome import ChromeDriverManager  # noqa: F401
+            except ImportError:
+                _browser_ok = False
+                return _browser_ok
+        hl = ExtendedHeadless(auto_install=True)
+        try:
+            hl.get_driver()
+            _browser_ok = True
+        except Exception as e:
+            print(f"\nskipping browser tests: cannot start Chrome ({type(e).__name__}: "
+                  f"{str(e).splitlines()[0][:120]})")
+            _browser_ok = False
+        finally:
+            hl.quit()
+    return _browser_ok
 
 
 def live_tests_enabled() -> bool:
@@ -123,9 +143,19 @@ class TestEngineRegistry(unittest.TestCase):
         scr = AdvancedSearchScraper(fallback=False)
         self.assertEqual(scr._engine_order(), ["duckduckgo"])
 
-    def test_forcing_an_engine_skips_the_chain(self):
+    def test_starting_engine_still_uses_the_chain(self):
+        # `engine=` used to silently disable fallback while `search_engine=`
+        # kept it. That asymmetry is gone: `fallback=` alone decides.
         scr = AdvancedSearchScraper()
-        self.assertEqual(scr._engine_order("bing"), ["bing"])
+        order = scr._engine_order("bing")
+        self.assertEqual(order[0], "bing")
+        self.assertGreater(len(order), 1)
+
+    def test_fallback_false_pins_a_single_engine(self):
+        scr = AdvancedSearchScraper()
+        self.assertEqual(scr._engine_order("bing", fallback=False), ["bing"])
+        self.assertEqual(
+            AdvancedSearchScraper(fallback=False)._engine_order("bing"), ["bing"])
 
     def test_custom_fallback_order_is_honoured(self):
         scr = AdvancedSearchScraper(search_engine="bing", fallback_engines=["mojeek"])
@@ -315,8 +345,12 @@ class TestFallbackChain(unittest.TestCase):
     def test_block_is_detected_by_its_challenge_form(self):
         blocked = self._fixture("blocked2.html", BLOCKED_HTML)
         scr = self._scraper({"primary": blocked}, "primary", fallback=False)
-        self.assertEqual(scr.search("q"), [])
-        self.assertIn("bot-check", scr._blocked_reason(self.driver))
+        response = scr.search("q")
+        self.assertEqual(response, [])
+        # The refusal must be reported, not merely turned into an empty list.
+        self.assertTrue(response.blocked)
+        self.assertEqual(response.attempts[0].status, "blocked")
+        self.assertIn("bot-check", response.attempts[0].reason)
 
     def test_empty_primary_falls_through(self):
         empty = self._fixture("empty.html", EMPTY_HTML)
@@ -365,12 +399,18 @@ class TestFallbackChain(unittest.TestCase):
         # The timeout must not poison the session for the next engine.
         self.assertEqual(len(scr.search("q", engine="backup")), 3)
 
-    def test_forced_engine_does_not_fall_back(self):
+    def test_fallback_false_pins_the_search_to_one_engine(self):
         blocked = self._fixture("b5.html", BLOCKED_HTML)
         ok = self._fixture("ok6.html", RESULTS_HTML)
         scr = self._scraper({"primary": blocked, "backup": ok}, "primary")
-        self.assertEqual(scr.search("q", engine="primary"), [])
-        self.assertEqual(len(scr.search("q", engine="backup")), 3)
+        # `engine=` chooses where to start; `fallback=` decides whether the
+        # rest of the chain is tried. They are independent.
+        self.assertEqual(scr.search("q", engine="primary", fallback=False), [])
+        self.assertEqual(len(scr.search("q", engine="backup", fallback=False)), 3)
+        # Starting at the blocked engine with fallback on still recovers.
+        recovered = scr.search("q", engine="primary")
+        self.assertEqual(len(recovered), 3)
+        self.assertEqual(recovered.engine, "backup")
 
     def test_max_results_is_respected(self):
         ok = self._fixture("ok7.html", RESULTS_HTML)

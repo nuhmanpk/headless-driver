@@ -18,19 +18,28 @@ tool. For a quick tour, see the [README](README.md).
   - [SearchScraper](#searchscraper)
   - [Driver discovery helpers](#driver-discovery-helpers)
   - [Console UI helpers](#console-ui-helpers)
+- [Search results](#search-results)
+- [Transports and browserless mode](#transports-and-browserless-mode)
+- [Parallel searching](#parallel-searching)
 - [Search engines](#search-engines)
 - [Timeouts](#timeouts)
 - [Diagnostics and logging](#diagnostics-and-logging)
 - [Running the tests](#running-the-tests)
 - [Troubleshooting](#troubleshooting)
+- [Deployment](#deployment)
 
 ---
 
 ## Install
 
 ```bash
-pip install headless-driver
+pip install headless-driver              # browser only
+pip install "headless-driver[http]"      # adds the browserless HTTP transport
 ```
+
+The `http` extra is strongly recommended: most engines are server-rendered, and
+fetching those without a browser is roughly two orders of magnitude cheaper. See
+[Transports](#transports-and-browserless-mode).
 
 Requires Python 3.9+ and an installed Chrome or Chromium. A matching
 ChromeDriver is downloaded automatically when needed, so you usually do not
@@ -169,9 +178,26 @@ yields plain text automatically.
 | Control | Effect |
 | --- | --- |
 | `--no-color` | Disable colour for this run |
-| `NO_COLOR=1` | Disable colour (takes precedence over `FORCE_COLOR`) |
+| `NO_COLOR=1` | Disable colour; wins over everything else |
 | `FORCE_COLOR=1` | Enable colour even when not a terminal |
 | `TERM=dumb` | Disable colour |
+
+Colour works on macOS, Linux and Windows, with no third-party dependency:
+
+- **macOS and Linux** — coloured whenever the stream is a terminal.
+- **Windows** — Windows Terminal, ConEmu and ANSICON are detected directly. On
+  a classic console host, `ENABLE_VIRTUAL_TERMINAL_PROCESSING` is switched on
+  through `ctypes`, which is what makes Windows 10+ interpret escape sequences.
+  A pre-Windows-10 console that rejects the change falls back to plain text.
+- **CI and cloud logs** — GitHub Actions, GitLab, CircleCI, Travis, Buildkite,
+  Drone, AppVeyor, TeamCity and AWS CodeBuild render ANSI in their log viewers
+  but are not terminals, so they are detected by environment variable and get
+  colour anyway. `NO_COLOR=1` still overrides that.
+
+Only the 16 basic ANSI colours are used, so output stays readable on low-colour
+terminals, and every symbol degrades to ASCII when the stream encoding cannot
+represent it — a Windows code page or a non-UTF-8 POSIX locale prints `+`, `x`
+and `!` instead of `✓`, `✗` and `!`.
 
 Non-ASCII symbols degrade to ASCII when the output encoding cannot represent
 them, and the spinner is skipped entirely off a terminal so logs stay clean.
@@ -395,20 +421,23 @@ AdvancedSearchScraper(
 
 | Attribute | Meaning |
 | --- | --- |
-| `results` | Every result accumulated across all searches, for `export()`. |
-| `last_engine` | Engine that produced the most recent results, or `None`. |
+| `results` | Accumulated history; empty unless `keep_history=True`. |
+| `last_response` | The most recent `SearchResponse`. |
+| `last_engine` | Engine that answered most recently, or `None`. Cleared on a failed search. |
 | `engines` | This instance's engine registry, a copy of `ENGINE_SPECS`. |
 
 **Methods**
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `search(query, max_results=None, engine=None)` | `List[Dict]` | Walks the chain. Passing `engine` forces one engine and skips the chain. |
-| `search_batch(queries, max_workers=4, per_query=None)` | `Dict[str, List[Dict]]` | Runs several queries; a failing query maps to `[]`. |
-| `export(path)` | `bool` | Writes `results` to `.json` or `.csv`. Any other extension returns `False`. |
-| `register_engine(name, spec)` | `None` | Adds or overrides an engine on this instance. |
+| `search(query, max_results=None, engine=None, fallback=None)` | `SearchResponse` | Walks the chain. `engine` chooses where to start; `fallback` decides whether the rest is tried. |
+| `search_batch(queries, max_workers=4, per_query=None)` | `Dict[str, SearchResponse]` | Sequential unless the chain is HTTP-only; see [Parallel searching](#parallel-searching). |
+| `export(path, results=None)` | `bool` | Writes `results`, else the history, else the last response, to `.json` or `.csv`. |
+| `register_engine(name, spec)` | `None` | Adds or overrides an engine. Unspecified `js` defaults to True. |
+| `capabilities(engine=None)` | `Dict` | Whether the engine needs a browser and returns snippets. |
+| `recycle()` | `None` | Discard the browser; the next search builds a fresh one. |
 | `default_result_processor(query, item)` | `Dict` | The identity processor used when `result_processor` is not supplied. |
-| `quit()` | `None` | Quits the driver if this object created it. |
+| `quit()` | `None` | Quits the driver if this object created it, and closes the HTTP session. |
 
 Each result is a dict:
 
@@ -420,7 +449,7 @@ Each result is a dict:
 | `favicon` | Favicon URL derived from the domain |
 | `cached` | Cached-page link when the engine offers one |
 | `quick_answer` | Reserved, currently `None` |
-| `engine` | Engine that produced this result |
+| `engine` | Engine that produced this result — reliable per result, unlike a shared `last_engine` |
 
 ```python
 from headless import AdvancedSearchScraper
@@ -434,11 +463,15 @@ with AdvancedSearchScraper(max_results=5) as scr:
 Choosing engines:
 
 ```python
-AdvancedSearchScraper(search_engine="bing")                        # different start
-AdvancedSearchScraper(fallback=False)                              # no chain
-AdvancedSearchScraper(fallback_engines=["bing", "mojeek"])          # custom order
-scr.search("query", engine="bing")                                 # force, one-off
+AdvancedSearchScraper(search_engine="bing")                # different start
+AdvancedSearchScraper(fallback=False)                      # no chain
+AdvancedSearchScraper(fallback_engines=["bing", "mojeek"]) # custom order
+scr.search("query", engine="bing")                         # start here, chain still applies
+scr.search("query", engine="bing", fallback=False)         # this engine only
 ```
+
+`engine` and `fallback` are independent. In 0.x, `search(engine=…)` silently
+disabled the chain while `search_engine=` did not; that asymmetry is gone.
 
 Batch searches and export:
 
@@ -528,8 +561,27 @@ find_chromedriver_path()  # -> chromedriver on PATH or a common location, or Non
 install_chromedriver()    # -> path to a driver matching the installed Chrome, or None
 ```
 
+```python
+from headless import chrome_version, default_user_agent, __version__
+
+chrome_version()      # -> "152.0.7977.65", or None
+default_user_agent()  # -> a User-Agent matching that browser and this OS
+__version__           # -> the installed package version
+```
+
 `install_chromedriver()` needs `webdriver-manager` and returns `None` when it is
-not installed. All three work on Linux, macOS and Windows.
+not installed. All of these work on Linux, macOS and Windows.
+
+### Exceptions
+
+```python
+from headless import HeadlessDriverError, AllEnginesBlocked
+```
+
+`HeadlessDriverError` is the base class for this package's exceptions.
+`AllEnginesBlocked` subclasses it and carries the `SearchResponse` on
+`.response`; it is raised only when `raise_on_block=True` and every engine
+refused.
 
 ### Console UI helpers
 
@@ -569,8 +621,149 @@ Style names: `bold`, `dim`, `italic`, `underline`, `red`, `green`, `yellow`,
 `blue`, `magenta`, `cyan`, `white`, `grey`.
 
 Module functions: `supports_color(stream)`, `supports_unicode(stream)`,
-`visible_width(text)` (ignores ANSI), `truncate(text, limit)`, and
-`diag(message)` which writes to stderr.
+`visible_width(text)` (ignores ANSI), `truncate(text, limit)`,
+`enable_windows_ansi()` (turns on the Windows console's ANSI mode and caches
+the result), the `LEVELS` table, and the stderr writers `diag(message, level)`,
+`debug`, `info`, `success`, `warn` and `error`.
+
+---
+
+## Search results
+
+`search()` returns a :class:`SearchResponse`. It behaves like the list of
+results it contains, so existing code is unaffected:
+
+```python
+for hit in scraper.search("python headless"):    # iterates results
+    print(hit["url"])
+
+results = scraper.search("python headless")
+if not results:                                  # falsey when empty
+    ...
+len(results), results[0], results == []          # all work
+```
+
+What it adds is **what happened**:
+
+```python
+response = scraper.search("python headless")
+
+response.engine        # engine that answered, or None
+response.blocked       # True only if every engine refused
+response.attempts      # one EngineAttempt per engine tried, in order
+response.refused       # just the refusals
+response.engines_tried # their names
+response.elapsed       # seconds
+response.as_dict()     # JSON-serialisable
+```
+
+This distinction is the point of the release. An empty list previously meant any
+of: nothing matched, a bot check, a timeout, or an unreachable host. The first
+means move on; the rest mean slow down, change address, or retry.
+
+```python
+response = scraper.search(query)
+if response.blocked:
+    back_off_and_rotate_proxy()      # not the query's fault
+elif not response:
+    record_no_such_page()            # genuinely nothing to find
+```
+
+### EngineAttempt
+
+| Field | Meaning |
+| --- | --- |
+| `engine` | Which engine |
+| `status` | `ok`, `empty`, `blocked`, `timeout`, `unreachable`, `error` |
+| `count` | Results extracted |
+| `reason` | Detail, e.g. `bot-check element '#challenge-form'` |
+| `elapsed` | Seconds |
+| `blocked` | True for every status except `ok` and `empty` |
+
+`response.blocked` is True only when **every** attempt was a refusal. One engine
+that genuinely had nothing makes the search an honest empty result.
+
+### Strict mode
+
+```python
+scraper = AdvancedSearchScraper(raise_on_block=True)
+try:
+    results = scraper.search(query)
+except AllEnginesBlocked as e:
+    e.response.attempts      # what each engine did
+```
+
+Only a blanket refusal raises; an ordinary empty result never does.
+
+---
+
+## Transports and browserless mode
+
+Most engines render results on the server, so they need an HTTP client and an
+HTML parser rather than a browser. With the `http` extra installed, those
+engines are fetched directly:
+
+| | Browser | HTTP |
+| --- | --- | --- |
+| Typical search | seconds | sub-second |
+| Memory | ~1 GB per Chrome | a few MB |
+| Thread-safe | no | yes |
+| Needs Chrome installed | yes | no |
+
+```python
+AdvancedSearchScraper(transport="auto")     # default: HTTP where possible
+AdvancedSearchScraper(transport="http")     # never start a browser
+AdvancedSearchScraper(transport="browser")  # always use Chrome
+```
+
+`auto` uses HTTP for engines whose spec says `js: False` and the browser for the
+rest, so no Chrome is started at all unless the chain reaches an engine that
+needs one. `http` drops browser-only engines from the chain entirely — useful in
+a container with no Chrome in it.
+
+```bash
+headless-driver search "python headless" --transport http
+```
+
+Non-HTTP URLs (`file://`, `data:`) always go through the browser.
+
+---
+
+## Parallel searching
+
+One WebDriver session cannot be driven from several threads, so a single
+browser-backed scraper cannot search in parallel — `search_batch` runs
+sequentially and says so rather than pretending otherwise.
+
+Two ways to get real concurrency:
+
+**HTTP transport** — no session, no constraint:
+
+```python
+scraper = AdvancedSearchScraper(transport="http")
+responses = scraper.search_batch(queries, max_workers=8)
+```
+
+**`ScraperPool`** — one browser per worker, for engines that need one:
+
+```python
+from headless import ScraperPool
+
+with ScraperPool(size=4, proxy="http://…", search_engine="duckduckgo_lite") as pool:
+    for query, response in pool.map(queries):
+        print(query, response.engine, len(response))
+```
+
+`ScraperPool(size, **scraper_kwargs)` passes everything else through to
+`AdvancedSearchScraper`. A worker whose browser dies is recycled rather than
+failing every later query.
+
+| Method | Returns |
+| --- | --- |
+| `search(query, **kw)` | One `SearchResponse`, on this thread's scraper |
+| `map(queries, **kw)` | Yields `(query, response)` as each finishes |
+| `search_batch(queries, **kw)` | `{query: response}` |
+| `quit()` | Closes every browser the pool opened |
 
 ---
 
@@ -593,7 +786,39 @@ JavaScript front end needs.
 
 An engine is abandoned and the next one tried when it serves a bot check,
 returns no results, exceeds `page_load_timeout`, or cannot be reached at all.
-`search()` returns `[]` only after every engine has been tried.
+The result is empty only after every engine has been tried — and
+`response.blocked` says whether that was a refusal or a genuine absence.
+
+### Capabilities
+
+`ENGINE_SPECS` records what each engine can do, so callers do not have to
+discover it by observation:
+
+| Key | Meaning |
+| --- | --- |
+| `js` | Needs a browser; `False` engines can use the HTTP transport |
+| `snippets` | Returns description text at all |
+
+```python
+scraper.capabilities("duckduckgo_lite")
+# {"js": False, "snippets": False, "url": "https://lite.duckduckgo.com/lite/?q={query}"}
+```
+
+`duckduckgo_lite` returns titles and URLs but **no snippets**; build matching on
+titles for that engine. `mojeek` serves a results-free stub to non-browser
+clients, so it is marked `js: True` despite rendering server-side.
+
+Verify the engines still parse — selectors are someone else's markup and rot
+without warning:
+
+```bash
+headless-driver doctor --engines
+headless-driver doctor --engines --transport http --query wikipedia
+```
+
+It runs a probe query through every engine and reports status, result count,
+title and snippet coverage, and timing. Worth running on a schedule in CI: it
+turns "silently degraded for six weeks" into a red build the next morning.
 
 Search engines defend aggressively against automation, and Google in particular
 serves a CAPTCHA to headless browsers on most networks — which is exactly why
@@ -635,8 +860,60 @@ stays safe:
 headless-driver search "python" --json 2>/dev/null | jq .
 ```
 
-`verbose=True` on any class prints its setup and teardown steps. In your own
-code, `headless.ui.diag(message)` writes one diagnostic line to stderr.
+Everything the library has to say goes through the `headless` logger, which
+carries a `NullHandler`, so an embedded copy stays silent until you ask:
+
+```python
+import logging
+
+logging.getLogger("headless").setLevel(logging.INFO)      # route into your own logs
+logging.getLogger("headless.scraper")                     # per-component children
+```
+
+Child loggers are `headless.core`, `headless.manager`, `headless.scraper` and
+`headless.transport`. To get the coloured console output instead:
+
+```python
+from headless import enable_console_logging, disable_console_logging, get_logger
+
+enable_console_logging()               # DEBUG to stderr, coloured
+enable_console_logging(logging.WARNING)
+disable_console_logging()
+get_logger("scraper")                  # the same child logger
+```
+
+`verbose=True` on any class calls `enable_console_logging()` for you — the
+caller explicitly asking for output is the one case where a library may write to
+the console uninvited. Diagnostics are
+coloured by severity, and a leading `[Component]` tag is highlighted separately
+so the message itself stands out:
+
+```
+[Headless] Building Chrome options...              grey, no marker
+✓ [Headless] WebDriver started successfully        green
+! [Headless] ChromeDriver is incompatible …        yellow
+✗ [Headless] Failed to start Chrome WebDriver      red
+```
+
+Emit your own with the same formatting:
+
+```python
+from headless.ui import diag, debug, info, success, warn, error
+
+warn("[MyBot] retrying in 5s")
+error("[MyBot] giving up")
+diag("[MyBot] custom", level="success")   # or call diag directly
+```
+
+| Level | Colour | Marker | Use |
+| --- | --- | --- | --- |
+| `debug` | grey | – | Tracing behind `verbose=True` |
+| `info` | grey | – | Ordinary progress |
+| `success` | green | `✓` | Something completed |
+| `warn` | yellow | `!` | Recoverable problem |
+| `error` | red | `✗` | Failure |
+
+All of them write to stderr and respect the colour rules above.
 
 ---
 
@@ -671,11 +948,45 @@ network is unavailable.
 
 ---
 
+## Deployment
+
+Getting Chrome and a matching driver into a container is most of the work of
+deploying this. The [Dockerfile](Dockerfile) in the repository does it:
+
+```bash
+docker build -t headless-driver .
+docker run --rm --shm-size=1g headless-driver search "python headless"
+```
+
+It pins Chrome and a matching chromedriver and bakes both in, so nothing is
+downloaded at runtime; runs as a non-root user with a writable `HOME`; and uses
+`tini` to reap the processes Chrome leaves behind.
+
+`--shm-size` matters: Chrome's default `/dev/shm` in Docker is 64 MB and it
+crashes on real pages without more. `--disable-dev-shm-usage` is already set,
+which covers most cases, but a larger shm is the more reliable fix.
+
+**Or skip Chrome entirely.** With `transport="http"` there is no browser to
+install, and the image is a plain `python:slim` with two pip packages:
+
+```dockerfile
+FROM python:3.12-slim
+RUN pip install --no-cache-dir "headless-driver[http]"
+```
+
+That covers every engine marked `js: False`. See
+[Transports](#transports-and-browserless-mode).
+
+---
+
 ## Troubleshooting
 
 **Run `headless-driver doctor` first.** It answers most of the questions below.
 
 | Symptom | Cause and fix |
+| --- | --- |
+| Searches return `[]` from a datacentre but work locally | Engines CAPTCHA cloud address ranges. Check `response.blocked` rather than treating it as "not found"; use a proxy, or a residential egress. |
+| A long-running worker grows in memory | `keep_history=True` retains every result. Leave it off (the default), or lower `history_limit`. |
 | --- | --- |
 | `SessionNotCreatedException`, "only supports Chrome version N" | The chromedriver on `PATH` is stale. A matching one is downloaded automatically; `brew upgrade chromedriver` or `apt install --only-upgrade chromium-driver` silences the warning. |
 | Search returns `[]` | Every engine was blocked or unreachable. Run with `verbose=True` to see which, and check `doctor`'s connectivity section. |

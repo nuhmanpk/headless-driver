@@ -1,5 +1,8 @@
 import io
 import os
+import sys
+import types
+import ctypes
 import json
 import argparse
 import unittest
@@ -7,7 +10,10 @@ import contextlib
 from unittest import mock
 
 from headless import ui, cli
-from headless.ui import Console, diag, supports_color, visible_width, truncate
+from headless.ui import (
+    Console, diag, supports_color, supports_unicode,
+    visible_width, truncate, enable_windows_ansi, LEVELS,
+)
 from headless.scraper import ENGINE_SPECS, DEFAULT_ENGINE
 
 
@@ -48,6 +54,186 @@ class TestColorDetection(unittest.TestCase):
     def test_non_tty_disables_color(self):
         # Piping to a file or another process must yield plain text.
         self.assertFalse(supports_color(io.StringIO()))
+
+
+class TestPortability(unittest.TestCase):
+    """Colour must behave on macOS, Linux, Windows and CI log viewers."""
+
+    def setUp(self):
+        self.env = mock.patch.dict(os.environ, {}, clear=False)
+        self.env.start()
+        for key in ("NO_COLOR", "FORCE_COLOR", "TERM", "WT_SESSION", "ANSICON",
+                    "ConEmuANSI", "TERM_PROGRAM", *ui._ANSI_CI_VARS):
+            os.environ.pop(key, None)
+        ui._windows_ansi_ready = None
+
+    def tearDown(self):
+        self.env.stop()
+        ui._windows_ansi_ready = None
+
+    def _tty(self):
+        stream = io.StringIO()
+        stream.isatty = lambda: True
+        return stream
+
+    def test_posix_terminal_gets_colour(self):
+        with mock.patch.object(os, "name", "posix"):
+            self.assertTrue(supports_color(self._tty()))
+
+    def test_windows_terminal_env_needs_no_console_call(self):
+        os.environ["WT_SESSION"] = "1"
+        with mock.patch.object(os, "name", "nt"):
+            self.assertTrue(enable_windows_ansi())
+            self.assertTrue(supports_color(self._tty()))
+
+    @staticmethod
+    def _fake_ctypes(kernel32):
+        """Stand in for ctypes: the real one cannot be poked at off Windows."""
+        module = types.ModuleType("ctypes")
+        module.windll = mock.Mock(kernel32=kernel32)
+        module.c_uint32 = ctypes.c_uint32
+        module.byref = ctypes.byref
+        return module
+
+    def test_windows_console_mode_is_enabled_once(self):
+        calls = []
+
+        class FakeKernel32:
+            def GetStdHandle(self, which): return 7
+            def GetConsoleMode(self, handle, ref):
+                ref._obj.value = 0x0001
+                return 1
+            def SetConsoleMode(self, handle, mode):
+                calls.append(mode)
+                return 1
+
+        fake = self._fake_ctypes(FakeKernel32())
+        with mock.patch.object(os, "name", "nt"), \
+                mock.patch.dict(sys.modules, {"ctypes": fake}):
+            self.assertTrue(enable_windows_ansi())
+            enable_windows_ansi()   # cached, must not re-enter the console API
+        # ENABLE_VIRTUAL_TERMINAL_PROCESSING (0x4) merged into the existing mode.
+        self.assertTrue(calls and all(m & 0x0004 for m in calls))
+        self.assertTrue(all(m & 0x0001 for m in calls), "existing mode bits dropped")
+        self.assertEqual(len(calls), 2, "expected one call per std handle")
+
+    def test_legacy_windows_console_falls_back_to_plain_text(self):
+        # A pre-Windows-10 console rejects the mode change.
+        class FailingKernel32:
+            def GetStdHandle(self, which): return 7
+            def GetConsoleMode(self, handle, ref): return 0
+            def SetConsoleMode(self, handle, mode): return 0
+
+        fake = self._fake_ctypes(FailingKernel32())
+        with mock.patch.object(os, "name", "nt"), \
+                mock.patch.dict(sys.modules, {"ctypes": fake}):
+            self.assertFalse(enable_windows_ansi())
+            self.assertFalse(supports_color(self._tty()))
+
+    def test_force_color_wins_on_a_legacy_windows_console(self):
+        os.environ["FORCE_COLOR"] = "1"
+
+        class FailingKernel32:
+            def GetStdHandle(self, which): return 7
+            def GetConsoleMode(self, handle, ref): return 0
+            def SetConsoleMode(self, handle, mode): return 0
+
+        fake = self._fake_ctypes(FailingKernel32())
+        with mock.patch.object(os, "name", "nt"), \
+                mock.patch.dict(sys.modules, {"ctypes": fake}):
+            self.assertTrue(supports_color(io.StringIO()))
+
+    def test_ci_log_viewers_get_colour_without_a_tty(self):
+        for var in ("GITHUB_ACTIONS", "GITLAB_CI", "CODEBUILD_BUILD_ID"):
+            with self.subTest(ci=var):
+                os.environ.pop("NO_COLOR", None)
+                os.environ[var] = "true"
+                try:
+                    with mock.patch.object(os, "name", "posix"):
+                        self.assertTrue(supports_color(io.StringIO()))
+                finally:
+                    os.environ.pop(var)
+
+    def test_no_color_still_wins_on_ci(self):
+        os.environ["GITHUB_ACTIONS"] = "true"
+        os.environ["NO_COLOR"] = "1"
+        self.assertFalse(supports_color(io.StringIO()))
+
+    def test_plain_redirected_output_stays_plain(self):
+        with mock.patch.object(os, "name", "posix"):
+            self.assertFalse(supports_color(io.StringIO()))
+
+    def test_unicode_detection_falls_back_for_ascii_streams(self):
+        class Ascii(io.StringIO):
+            encoding = "ascii"
+        self.assertFalse(supports_unicode(Ascii()))
+        class Utf8(io.StringIO):
+            encoding = "utf-8"
+        self.assertTrue(supports_unicode(Utf8()))
+
+
+class TestDiagnostics(unittest.TestCase):
+    @staticmethod
+    def _stream(encoding=None):
+        # StringIO.encoding is read-only, so declare it on a subclass.
+        return type("Stream", (io.StringIO,), {"encoding": encoding})()
+
+    def _emit(self, message, level="info", encoding=None):
+        stream = self._stream(encoding)
+        with mock.patch.dict(os.environ, {"FORCE_COLOR": "1"}):
+            diag(message, level, stream=stream)
+        return stream.getvalue()
+
+    def test_every_level_is_defined(self):
+        self.assertEqual(set(LEVELS), {"debug", "info", "success", "warn", "error"})
+
+    def test_levels_use_distinct_colours(self):
+        seen = {}
+        for level in LEVELS:
+            seen[level] = self._emit("hello", level)
+        self.assertIn("\033[31m", seen["error"])     # red
+        self.assertIn("\033[33m", seen["warn"])      # yellow
+        self.assertIn("\033[32m", seen["success"])   # green
+        self.assertIn("\033[90m", seen["info"])      # grey
+
+    def test_warn_and_error_carry_a_marker(self):
+        self.assertIn("!", self._emit("careful", "warn"))
+        self.assertIn("✗", self._emit("broken", "error", encoding="utf-8"))
+        self.assertNotIn("✗", self._emit("routine", "info", encoding="utf-8"))
+
+    def test_marker_degrades_to_ascii_on_a_non_unicode_terminal(self):
+        # A Windows code page or a POSIX locale without UTF-8 must not raise.
+        out = self._emit("broken", "error", encoding="ascii")
+        self.assertIn("x", out)
+        self.assertNotIn("✗", out)
+        out.encode("ascii")  # must be writable to such a stream
+
+    def test_component_tag_is_highlighted_separately(self):
+        out = self._emit("[Headless] starting up", "info")
+        self.assertIn("\033[36m[Headless]\033[0m", out)   # cyan tag
+        self.assertIn("starting up", out)
+
+    def test_message_without_a_tag_still_renders(self):
+        self.assertIn("no tag here", self._emit("no tag here", "warn"))
+
+    def test_unknown_level_falls_back_to_info(self):
+        self.assertIn("mystery", self._emit("mystery", "bogus"))
+
+    def test_output_is_plain_when_colour_is_disabled(self):
+        stream = io.StringIO()
+        with mock.patch.dict(os.environ, {"NO_COLOR": "1"}):
+            diag("[Headless] plain please", "error", stream=stream)
+        out = stream.getvalue()
+        self.assertNotIn("\033[", out)
+        self.assertIn("[Headless]", out)
+        self.assertIn("plain please", out)
+
+    def test_diag_defaults_to_stderr(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            diag("a diagnostic", "warn")
+        self.assertEqual(out.getvalue(), "")
+        self.assertIn("a diagnostic", err.getvalue())
 
 
 class TestConsole(unittest.TestCase):
@@ -230,10 +416,16 @@ class FakeScraper:
         self.quit_calls = 0
         self.results = []
 
-    def search(self, query, max_results=None, engine=None):
+    def search(self, query, max_results=None, engine=None, fallback=None):
+        from headless.results import (SearchResponse, EngineAttempt,
+                                      STATUS_OK, STATUS_EMPTY)
         self.results = list(self.results_to_return)
         self.last_engine = "duckduckgo" if self.results else None
-        return self.results
+        status = STATUS_OK if self.results else STATUS_EMPTY
+        return SearchResponse(
+            query=query, results=self.results, engine=self.last_engine,
+            attempts=[EngineAttempt("duckduckgo", status, count=len(self.results))],
+            elapsed=0.1)
 
     def _engine_order(self, engine=None):
         return ["duckduckgo", "bing"]
@@ -321,11 +513,14 @@ class TestCommands(unittest.TestCase):
                 captured.update(kwargs)
 
         self._run(["search", "python", "-n", "3", "-e", "bing",
-                   "--no-fallback", "--timeout", "7"], Recording)
+                   "--no-fallback", "--timeout", "7",
+                   "--transport", "http", "--proxy", "http://127.0.0.1:8080"], Recording)
         self.assertEqual(captured["max_results"], 3)
         self.assertEqual(captured["search_engine"], "bing")
         self.assertFalse(captured["fallback"])
         self.assertEqual(captured["page_load_timeout"], 7.0)
+        self.assertEqual(captured["transport"], "http")
+        self.assertEqual(captured["proxy"], "http://127.0.0.1:8080")
 
     def test_search_always_quits_the_driver(self):
         instances = []
@@ -357,6 +552,34 @@ class TestCommands(unittest.TestCase):
     def test_json_mode_never_colours_its_output(self):
         code, out = self._run(["search", "python", "--json"], FakeScraper)
         self.assertNotIn("\033[", out)
+
+    def test_blocked_and_empty_are_reported_differently(self):
+        from headless.results import SearchResponse, EngineAttempt, STATUS_BLOCKED
+
+        class Blocked(FakeScraper):
+            def search(self, query, max_results=None, engine=None, fallback=None):
+                self.results = []
+                return SearchResponse(query=query, attempts=[
+                    EngineAttempt("duckduckgo", STATUS_BLOCKED, reason="captcha")])
+
+        code, out = self._run(["search", "python"], Blocked)
+        self.assertEqual(code, cli.EXIT_FAILED)
+        self.assertIn("refused", out)
+        # The plain-empty wording must not be used for a refusal.
+        self.assertNotIn("run 'headless-driver doctor'", out)
+
+    def test_search_json_reports_attempts_and_blocked(self):
+        code, out = self._run(["search", "python", "--json"], FakeScraper)
+        payload = json.loads(out)
+        self.assertIn("attempts", payload)
+        self.assertIn("blocked", payload)
+        self.assertEqual(payload["attempts"][0]["engine"], "duckduckgo")
+
+    def test_engines_json_reports_capabilities(self):
+        code, out = self._run(["engines", "--json"])
+        payload = json.loads(out)
+        self.assertFalse(payload["engines"]["duckduckgo"]["js"])
+        self.assertFalse(payload["engines"]["duckduckgo_lite"]["snippets"])
 
     def test_no_color_flag_strips_ansi(self):
         code, out = self._run(["--no-color", "engines"])

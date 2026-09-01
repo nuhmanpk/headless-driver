@@ -11,9 +11,14 @@ import subprocess
 from typing import List, Optional
 from urllib.parse import urlparse
 
+import logging
+
 from .ui import Console
-from .core import find_chromedriver_path, find_chrome_binary
+from .logs import enable_console_logging, get_logger
+from .core import find_chromedriver_path, find_chrome_binary, chrome_version
+from .transport import http_available
 from .manager import ExtendedHeadless
+from .results import STATUS_OK
 from .scraper import (
     AdvancedSearchScraper,
     ENGINE_SPECS,
@@ -85,28 +90,38 @@ def cmd_search(args, con: Console) -> int:
         fallback=not args.no_fallback,
         verbose=args.verbose,
         page_load_timeout=args.timeout,
+        transport=args.transport,
+        proxy=args.proxy,
         headless_options={"page_load_timeout": args.timeout},
     )
     try:
         started = time.time()
         if args.json:
-            results = scraper.search(args.query)
+            response = scraper.search(args.query)
         else:
             con.rule(f"search {con.sym('arrow')} {args.query}")
             with con.spinner(f"querying {args.engine}"):
-                results = scraper.search(args.query)
+                response = scraper.search(args.query)
+        results = list(response)
         elapsed = time.time() - started
 
         if args.json:
-            json.dump({"query": args.query, "engine": scraper.last_engine,
-                       "elapsed": round(elapsed, 2), "results": results},
-                      sys.stdout, ensure_ascii=False, indent=2)
+            json.dump(response.as_dict(), sys.stdout, ensure_ascii=False, indent=2)
             sys.stdout.write("\n")
             return EXIT_OK if results else EXIT_FAILED
 
         if not results:
-            con.fail("no results", f"tried {len(scraper._engine_order())} engines")
-            con.note("run 'headless-driver doctor' to check connectivity")
+            # "Nobody has an answer" and "everybody refused me" call for
+            # opposite reactions, so never report them the same way.
+            if response.blocked:
+                con.fail("every engine refused this query",
+                         f"{len(response.attempts)} tried")
+                for a in response.attempts:
+                    con.note(f"{a.engine}: {a.status} {a.reason}".rstrip())
+                con.note("try a proxy, a different network, or wait and retry")
+            else:
+                con.fail("no results", f"tried {len(response.attempts)} engines")
+                con.note("run 'headless-driver doctor' to check connectivity")
             return EXIT_FAILED
 
         for index, item in enumerate(results, 1):
@@ -119,11 +134,14 @@ def cmd_search(args, con: Console) -> int:
                 con.write(f"     {con.style(snippet[:160], 'grey')}")
             con.write()
 
+        skipped = [a for a in response.attempts if a.status != STATUS_OK]
         con.write(" ".join([
             con.style(f" {len(results)} results", "green", "bold"),
-            con.style(f"via {scraper.last_engine}", "grey"),
+            con.style(f"via {response.engine}", "grey"),
             con.style(f"in {elapsed:.1f}s", "grey"),
         ]))
+        if skipped:
+            con.note("skipped " + ", ".join(f"{a.engine} ({a.status})" for a in skipped))
         if args.save:
             saved = scraper.export(args.save)
             (con.ok if saved else con.fail)(
@@ -135,8 +153,12 @@ def cmd_search(args, con: Console) -> int:
 
 def cmd_engines(args, con: Console) -> int:
     if args.json:
-        json.dump({"default": DEFAULT_ENGINE, "chain": [DEFAULT_ENGINE] + DEFAULT_FALLBACK_ENGINES,
-                   "engines": {n: s["url"] for n, s in ENGINE_SPECS.items()}},
+        json.dump({"default": DEFAULT_ENGINE,
+                   "chain": [DEFAULT_ENGINE] + DEFAULT_FALLBACK_ENGINES,
+                   "engines": {n: {"url": sp["url"],
+                                   "js": bool(sp.get("js", True)),
+                                   "snippets": bool(sp.get("snippets", True))}
+                               for n, sp in ENGINE_SPECS.items()}},
                   sys.stdout, indent=2)
         sys.stdout.write("\n")
         return EXIT_OK
@@ -150,9 +172,12 @@ def cmd_engines(args, con: Console) -> int:
             str(position) if position else "-",
             name + (" (default)" if name == DEFAULT_ENGINE else ""),
             urlparse(spec["url"]).netloc,
+            "browser" if spec.get("js", True) else "http",
+            "yes" if spec.get("snippets", True) else "no",
         ])
-    rows.sort(key=lambda r: (r[0] == "-", r[0]))
-    con.table(["#", "engine", "endpoint"], rows, styles=["grey", "bold", "cyan"])
+    rows.sort(key=lambda r: (r[0] == "-", int(r[0]) if r[0].isdigit() else 99))
+    con.table(["#", "engine", "endpoint", "needs", "snippets"], rows,
+              styles=["grey", "bold", "cyan", "", ""])
     con.write()
     con.note(f"tried in order: {' → '.join(chain)}")
     return EXIT_OK
@@ -166,7 +191,75 @@ def _reachable(host: str, timeout: float = 5.0) -> bool:
         return False
 
 
+def cmd_engine_check(args, con: Console) -> int:
+    """Run a known-good query through every engine and report what came back.
+
+    `doctor` proves the environment works; this proves the *product* does. An
+    engine whose markup has changed still resolves, still connects, and still
+    returns a page — and silently yields nothing. Only a real query catches it.
+    """
+    probe = args.query
+    con.rule(f"engine check {con.sym('arrow')} {probe!r}")
+    rows, healthy = [], 0
+
+    for name in sorted(ENGINE_SPECS):
+        spec = ENGINE_SPECS[name]
+        if args.transport == "http" and spec.get("js", True):
+            # Not a failure: this engine simply cannot be served without a browser.
+            rows.append([name, "skipped", "-", "-", "-", "-"])
+            continue
+        scraper = AdvancedSearchScraper(
+            max_results=3, search_engine=name, fallback=False,
+            transport=args.transport, proxy=args.proxy,
+            page_load_timeout=args.timeout, verbose=args.verbose)
+        try:
+            with con.spinner(f"checking {name}"):
+                response = scraper.search(probe)
+            attempt = response.attempts[0] if response.attempts else None
+            status = attempt.status if attempt else "error"
+            titles = sum(1 for r in response if r.get("title"))
+            snippets = sum(1 for r in response if r.get("snippet"))
+            if status == STATUS_OK and titles:
+                healthy += 1
+            rows.append([
+                name,
+                status,
+                str(len(response)),
+                f"{titles}/{len(response)}" if response else "-",
+                f"{snippets}/{len(response)}" if response else "-",
+                f"{attempt.elapsed:.1f}s" if attempt else "-",
+            ])
+        except Exception as e:
+            rows.append([name, "error", "0", "-", "-", f"{type(e).__name__}"])
+        finally:
+            scraper.quit()
+
+    con.table(["engine", "status", "results", "titles", "snippets", "time"], rows,
+              styles=["bold", "", "", "", "", "grey"])
+    con.write()
+
+    # An engine that declares snippets and returns none has probably rotted.
+    for row, name in zip(rows, sorted(ENGINE_SPECS)):
+        if row[1] == STATUS_OK and row[4].startswith("0/"):
+            if ENGINE_SPECS[name].get("snippets", True):
+                con.warn(f"{name} returned no snippets", "selector may have changed")
+
+    skipped = sum(1 for r in rows if r[1] == "skipped")
+    failed = len(rows) - healthy - skipped
+    summary = con.style(f" {healthy} healthy", "green", "bold")
+    if failed:
+        summary += con.style(f", {failed} not answering", "yellow", "bold")
+    if skipped:
+        summary += con.style(f", {skipped} need a browser", "grey")
+    con.write(f"{summary}  {con.bar(healthy, 0, failed)}")
+    # Engines block by design, so a refusal is not a failing build; no engine
+    # answering at all is.
+    return EXIT_OK if healthy else EXIT_FAILED
+
+
 def cmd_doctor(args, con: Console) -> int:
+    if getattr(args, "engines", False):
+        return cmd_engine_check(args, con)
     checks: List[str] = []
 
     def record(ok: bool, label: str, detail: str = "", fatal: bool = True) -> None:
@@ -209,6 +302,11 @@ def cmd_doctor(args, con: Console) -> int:
                f"chrome {chrome_major} vs driver {driver_major}"
                + ("" if matched else " - a matching driver will be downloaded"),
                fatal=False)
+
+    ok, why = http_available()
+    record(True, "http transport",
+           "available (browserless mode enabled)" if ok else f"{why} - install headless-driver[http]",
+           fatal=False)
 
     for module, label in (("webdriver_manager", "webdriver-manager"),
                           ("selenium_stealth", "selenium-stealth")):
@@ -309,6 +407,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="do not try other engines if this one fails")
     search.add_argument("--save", metavar="PATH", help="also write results to .json or .csv")
     search.add_argument("--timeout", type=float, default=20.0, help="page load timeout")
+    search.add_argument("--transport", choices=("auto", "http", "browser"), default="auto",
+                        help="how to fetch pages; http skips the browser entirely")
+    search.add_argument("--proxy", help="proxy server, e.g. socks5://127.0.0.1:9050")
     search.add_argument("--json", action="store_true", help="print JSON instead")
     search.set_defaults(func=cmd_search)
 
@@ -317,6 +418,14 @@ def build_parser() -> argparse.ArgumentParser:
     engines.set_defaults(func=cmd_engines)
 
     doctor = sub.add_parser("doctor", help="check chrome, driver and connectivity")
+    doctor.add_argument("--engines", action="store_true",
+                        help="query every engine and report which still parse")
+    doctor.add_argument("--query", default="wikipedia",
+                        help="probe query for --engines")
+    doctor.add_argument("--transport", choices=("auto", "http", "browser"), default="auto",
+                        help="how to fetch pages for --engines")
+    doctor.add_argument("--proxy", help="proxy server to test through")
+    doctor.add_argument("--timeout", type=float, default=20.0, help="page load timeout")
     doctor.set_defaults(func=cmd_doctor)
 
     for name, help_text, default_out in (
@@ -345,6 +454,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     # JSON output must stay machine-readable, so never colour it.
     color = False if (args.no_color or getattr(args, "json", False)) else None
     con = Console(color=color)
+    # The library is silent unless asked; the CLI is the caller doing the asking.
+    enable_console_logging(logging.DEBUG if args.verbose else logging.WARNING)
     try:
         return args.func(args, con)
     except KeyboardInterrupt:
