@@ -1,0 +1,7 @@
+# Everything needed to run the full test suite, coverage and a release build.
+#   pip install -r requirements-dev.txt && playwright install chromium
+-r requirements.txt
+coverage[toml]>=7.4
+build>=1.0
+twine>=5.0
+trove-classifiers

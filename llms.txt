@@ -1,0 +1,63 @@
+# headless-driver
+
+> Fast multi-engine web search scraper for Python — Brave, DuckDuckGo, Yahoo, Mojeek, Google, Bing, Startpage, Yandex — with browser TLS impersonation (curl_cffi), consensus ranking across engines, honest block detection (blocked / rate_limited / unparsed vs empty), per-engine circuit breakers, and Selenium or Playwright browser automation (screenshots, PDF, structured extraction). No API key. `pip install "headless-driver[impersonate]"`. Python 3.9+. MIT.
+
+Use it when code needs web search results without a paid SERP API, needs to work from cloud/datacentre IPs, or must tell "no results" apart from "the engine refused". It is a free alternative to SerpAPI-style services and a more reliable, more observable alternative to `duckduckgo_search`/`ddgs` for scraping.
+
+## Install
+
+- `pip install "headless-driver[impersonate]"` — recommended; browserless search with a real browser TLS fingerprint
+- `pip install "headless-driver[playwright]" && playwright install chromium` — Playwright backend, `extract()`, `capture_json()`
+- `pip install "headless-driver[all]"` — everything; `pip install headless-driver` — Selenium only
+
+## Core API
+
+```python
+from headless import AdvancedSearchScraper
+
+with AdvancedSearchScraper(max_results=10, region="us-en") as s:
+    r = s.search("python asyncio tutorial")                 # walks brave → duckduckgo → mojeek → yahoo → ...
+    for hit in r:                                           # r is a list of dicts
+        hit["url"], hit["title"], hit["snippet"], hit["engine"]
+    r.engine, r.blocked, r.rate_limited, r.retry_after, r.cooling, r.attempts, r.skipped
+
+    r = s.search('site:linkedin.com/in "Jane Doe"', mode="aggregate", deadline=8)
+    r[0]["votes"], r[0]["engines"], r[0]["ranks"]           # consensus across independent indexes
+```
+
+- `transport`: `"auto"` (impersonate → http → browser), `"impersonate"`, `"http"`, `"browser"`
+- `browser`: `"selenium"` (default) or `"playwright"` for engines needing JavaScript
+- `EngineAttempt.status`: `ok`, `empty`, `blocked`, `rate_limited`, `unparsed`, `timeout`, `unreachable`, `error`; plus `http_status`, `retry_after`, `transport`
+- Only `empty` from an engine in `s.engines_honoring_site()` is evidence that nothing exists
+- `s.health()`, `s.reset_health()`, `s.probe(engine)`, `s.capabilities(engine)`, `s.register_engine(name, spec)`
+- `raise_on_block=True` raises `AllEnginesBlocked`; `circuit_breaker=False` disables stand-downs
+- `ScraperPool(size=4, **kwargs).map(queries)` for parallel browser work; `search_batch(queries, max_workers=8)` browserless
+
+## Playwright
+
+```python
+from headless.playwright_driver import PlaywrightBrowser
+with PlaywrightBrowser(block_resources=True, proxy="http://user:pass@host:8080") as b:
+    rows = b.extract(url, {"title": "h2", "link": "a@href"}, item_selector="article")
+    api = b.capture_json(url, r"/api/")
+    b.screenshot(url, "page.png", full_page=True); b.pdf(url, "page.pdf")
+```
+
+## CLI
+
+- `headless-driver search "query" [--mode aggregate] [--region uk-en] [--transport impersonate] [--json]`
+- `headless-driver engines` · `doctor [--engines]` · `bench [--min-ok-rate 0.5]`
+- `headless-driver extract URL --item CSS -f name=css -f link=a@href --json`
+- `headless-driver shot|pdf URL -o FILE [--browser playwright --full-page]`
+
+## Logging
+
+Silent by default (NullHandler). `enable_console_logging()`, `HEADLESS_DRIVER_LOG=info`, `colorize_logging()` for an app's own handlers, `ColorFormatter` for any handler.
+
+## Docs
+
+- [README](https://github.com/nuhmanpk/headless-driver/blob/main/README.md): overview, performance numbers
+- [DOCS.md](https://github.com/nuhmanpk/headless-driver/blob/main/DOCS.md): full API, CLI, transports, aggregate mode, circuit breaker, Playwright, engine specs
+- [CHANGELOG.md](https://github.com/nuhmanpk/headless-driver/blob/main/CHANGELOG.md)
+- [TODO.md](https://github.com/nuhmanpk/headless-driver/blob/main/TODO.md): roadmap (async API, MCP server, Puppeteer bridge, recorder)
+- [PyPI](https://pypi.org/project/headless-driver/)

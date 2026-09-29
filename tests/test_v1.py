@@ -19,6 +19,10 @@ from headless.results import (
     STATUS_UNREACHABLE, STATUS_ERROR,
 )
 from headless.transport import HtmlNode, Page, http_available
+try:
+    from .support import HermeticTestCase
+except ImportError:  # run as top-level modules by `discover -s tests`
+    from support import HermeticTestCase
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 
@@ -31,7 +35,7 @@ def fixture_page(name: str) -> Page:
     return Page(HtmlNode(BeautifulSoup(html, "html.parser"), url), url)
 
 
-class TestSearchResponse(unittest.TestCase):
+class TestSearchResponse(HermeticTestCase):
     """The response must stay a drop-in for the list it replaced."""
 
     def _response(self, n=2, **kw):
@@ -92,8 +96,214 @@ class TestSearchResponse(unittest.TestCase):
         self.assertFalse(payload["blocked"])
 
 
+class TestListCompatibility(HermeticTestCase):
+    """A response must be usable everywhere the old list was.
+
+    These are the patterns a real pipeline uses; each one broke when the
+    response was a dataclass rather than a list.
+    """
+
+    def setUp(self):
+        self.r = SearchResponse(
+            query="q", engine="bing",
+            results=[{"url": "https://a.com", "title": "A"},
+                     {"url": "https://b.com", "title": "B"}],
+            attempts=[EngineAttempt("bing", STATUS_OK, 2)])
+
+    def test_is_a_list(self):
+        self.assertIsInstance(self.r, list)
+
+    def test_json_serialisable(self):
+        # A scraper that cannot json.dumps its results is useless in a pipeline.
+        payload = json.loads(json.dumps(self.r))
+        self.assertEqual(payload[0]["url"], "https://a.com")
+
+    def test_concatenation_both_ways(self):
+        self.assertEqual(len(self.r + [{"url": "c"}]), 3)
+        self.assertEqual(len([{"url": "c"}] + self.r), 3)
+
+    def test_mutation(self):
+        self.r.append({"url": "https://c.com"})
+        self.r.extend([{"url": "https://d.com"}])
+        self.assertEqual(len(self.r), 4)
+
+    def test_list_methods(self):
+        self.assertEqual(self.r.count(self.r[0]), 1)
+        self.assertEqual(self.r.index(self.r[1]), 1)
+        self.assertEqual(len(list(reversed(self.r))), 2)
+
+    def test_slicing_sorting_and_membership(self):
+        self.assertEqual(len(self.r[:1]), 1)
+        self.assertEqual(sorted(self.r, key=lambda h: h["url"])[0]["url"], "https://a.com")
+        self.assertIn(self.r[0], self.r)
+
+    def test_copy_and_pickle(self):
+        import copy, pickle
+        self.assertEqual(len(copy.deepcopy(self.r)), 2)
+        self.assertEqual(len(pickle.loads(pickle.dumps(self.r))), 2)
+
+    def test_equality_with_a_plain_list(self):
+        self.assertEqual(self.r, [{"url": "https://a.com", "title": "A"},
+                                  {"url": "https://b.com", "title": "B"}])
+        self.assertEqual(SearchResponse(query="q"), [])
+
+    def test_results_attribute_reads_and_writes(self):
+        self.assertEqual(self.r.results, list(self.r))
+        self.r.results = [{"url": "https://z.com"}]
+        self.assertEqual(len(self.r), 1)
+        self.assertEqual(self.r[0]["url"], "https://z.com")
+
+    def test_metadata_survives_list_behaviour(self):
+        self.r.append({"url": "https://c.com"})
+        self.assertEqual(self.r.engine, "bing")
+        self.assertEqual(self.r.query, "q")
+        self.assertFalse(self.r.blocked)
+
+
+class TestProxyIsNeverBypassed(HermeticTestCase):
+    """Traffic must never leave from the host when a proxy was configured."""
+
+    LEGACY = {"additional_args": ["--proxy-server=http://user:pass@proxy:8080"]}
+
+    @unittest.skipUnless(http_available()[0], "needs the http extra")
+    def test_http_transport_honours_a_proxy_given_as_a_chrome_switch(self):
+        # The pre-1.0 way to set a proxy. The HTTP transport cannot see Chrome
+        # switches, so without explicit handling this silently leaked the host IP.
+        scr = AdvancedSearchScraper(headless_options=dict(self.LEGACY))
+        session = scr._http_transport().session
+        self.assertEqual(session.proxies.get("https"), "http://user:pass@proxy:8080")
+
+    @unittest.skipUnless(http_available()[0], "needs the http extra")
+    def test_http_transport_honours_the_proxy_argument(self):
+        scr = AdvancedSearchScraper(proxy="socks5://127.0.0.1:9050")
+        self.assertEqual(scr._http_transport().session.proxies.get("http"),
+                         "socks5://127.0.0.1:9050")
+
+    def test_explicit_proxy_wins_over_the_legacy_switch(self):
+        scr = AdvancedSearchScraper(proxy="http://explicit:1",
+                                    headless_options=dict(self.LEGACY))
+        self.assertEqual(scr._effective_proxy(), "http://explicit:1")
+
+    def test_no_proxy_configured_means_none(self):
+        self.assertIsNone(AdvancedSearchScraper()._effective_proxy())
+
+    @unittest.skipUnless(http_available()[0], "needs the http extra")
+    def test_user_agent_from_headless_options_reaches_the_http_session(self):
+        scr = AdvancedSearchScraper(headless_options={"user_agent": "Custom/1.0"})
+        self.assertEqual(scr._http_transport().session.headers["User-Agent"],
+                         "Custom/1.0")
+
+
+class TestAdFiltering(HermeticTestCase):
+    """Sponsored slots sit among organic results and must not be scraped."""
+
+    def test_known_ad_endpoints_are_recognised(self):
+        for url in ("https://duckduckgo.com/y.js?ad_domain=coursera.org&ad_provider=bing",
+                    "https://www.bing.com/aclick?ld=abc",
+                    "https://www.bing.com/aclk?foo=1",
+                    "https://www.google.com/aclk?sa=l",
+                    "https://googleadservices.com/pagead/x",
+                    "https://ad.doubleclick.net/x"):
+            with self.subTest(url=url):
+                self.assertTrue(AdvancedSearchScraper._is_ad_url(url))
+
+    def test_organic_results_are_not_mistaken_for_ads(self):
+        for url in ("https://www.linkedin.com/in/peterdemin",
+                    "https://en.wikipedia.org/wiki/Advertising",
+                    "https://duckduckgo.com/about",
+                    "https://example.com/products/adapter"):
+            with self.subTest(url=url):
+                self.assertFalse(AdvancedSearchScraper._is_ad_url(url))
+
+    @unittest.skipUnless(http_available()[0], "needs the http extra")
+    def test_an_ad_link_is_skipped_during_extraction(self):
+        from bs4 import BeautifulSoup
+        from headless.transport import HtmlNode
+        html = ("<div class='result'>"
+                "<a class='result__a' href='https://duckduckgo.com/y.js?ad_domain=x'>Ad</a>"
+                "<a class='result__a' href='https://real.example.com/page'>Real</a>"
+                "</div>")
+        node = HtmlNode(BeautifulSoup(html, "html.parser"), "https://html.duckduckgo.com/")
+        scr = AdvancedSearchScraper(transport="http")
+        item = scr._extract_result(node.select("div.result")[0], "duckduckgo")
+        self.assertEqual(item["url"], "https://real.example.com/page")
+
+
+class TestSiteOperator(HermeticTestCase):
+    """Engines disagree about `site:`; results that ignore it are not results."""
+
+    def test_constraints_are_parsed(self):
+        self.assertEqual(
+            AdvancedSearchScraper._site_constraints('site:linkedin.com/in "a b" x'),
+            ["linkedin.com/in"])
+        self.assertEqual(AdvancedSearchScraper._site_constraints("no operator"), [])
+
+    def test_matching_accepts_subdomains_and_paths(self):
+        m = AdvancedSearchScraper._matches_site
+        self.assertTrue(m("https://www.linkedin.com/in/x", ["linkedin.com/in"]))
+        self.assertTrue(m("https://in.linkedin.com/in/x", ["linkedin.com/in"]))
+        self.assertTrue(m("https://linkedin.com/company/x", ["linkedin.com"]))
+
+    def test_matching_rejects_the_wrong_path_or_host(self):
+        m = AdvancedSearchScraper._matches_site
+        # Bing honours site:domain but ignores the path, returning these.
+        self.assertFalse(m("https://www.linkedin.com/company/x", ["linkedin.com/in"]))
+        self.assertFalse(m("https://en.wikipedia.org/wiki/Software", ["linkedin.com/in"]))
+        self.assertFalse(m("https://notlinkedin.com/in/x", ["linkedin.com/in"]))
+
+    def test_several_constraints_are_an_or(self):
+        m = AdvancedSearchScraper._matches_site
+        self.assertTrue(m("https://github.com/x", ["github.com", "linkedin.com"]))
+
+    @unittest.skipUnless(http_available()[0], "needs the http extra")
+    def test_off_target_results_are_dropped_and_the_engine_reads_as_empty(self):
+        from bs4 import BeautifulSoup
+        from headless.transport import HtmlNode, Page
+        html = "".join(
+            f"<div class='result'><a class='result__a' href='{u}'>T{i}</a></div>"
+            for i, u in enumerate(["https://en.wikipedia.org/wiki/Software",
+                                   "https://www.microsoft.com/download"]))
+        page = Page(HtmlNode(BeautifulSoup(html, "html.parser"),
+                             "https://html.duckduckgo.com/"), "https://html.duckduckgo.com/")
+        scr = AdvancedSearchScraper(transport="http")
+        scr._transport_for = lambda e: (mock.Mock(fetch=lambda *a, **k: page, name="http"), False)
+        response = scr.search("site:linkedin.com/in engineer", engine="duckduckgo",
+                              fallback=False)
+        # Plausible-looking off-target results are worse than none at all.
+        self.assertEqual(len(response), 0)
+        self.assertEqual(response.attempts[0].status, STATUS_EMPTY)
+
+    @unittest.skipUnless(http_available()[0], "needs the http extra")
+    def test_on_target_results_survive(self):
+        from bs4 import BeautifulSoup
+        from headless.transport import HtmlNode, Page
+        html = ("<div class='result'>"
+                "<a class='result__a' href='https://www.linkedin.com/in/peterdemin'>P</a>"
+                "</div>")
+        page = Page(HtmlNode(BeautifulSoup(html, "html.parser"),
+                             "https://html.duckduckgo.com/"), "https://html.duckduckgo.com/")
+        scr = AdvancedSearchScraper(transport="http")
+        scr._transport_for = lambda e: (mock.Mock(fetch=lambda *a, **k: page, name="http"), False)
+        response = scr.search("site:linkedin.com/in peter", engine="duckduckgo",
+                              fallback=False)
+        self.assertEqual(len(response), 1)
+        self.assertEqual(response[0]["url"], "https://www.linkedin.com/in/peterdemin")
+
+    @unittest.skipUnless(http_available()[0], "needs the http extra")
+    def test_queries_without_the_operator_are_unfiltered(self):
+        from bs4 import BeautifulSoup
+        from headless.transport import HtmlNode, Page
+        html = ("<div class='result'>"
+                "<a class='result__a' href='https://anything.example.com/x'>X</a></div>")
+        page = Page(HtmlNode(BeautifulSoup(html, "html.parser"),
+                             "https://html.duckduckgo.com/"), "https://html.duckduckgo.com/")
+        scr = AdvancedSearchScraper(transport="http")
+        scr._transport_for = lambda e: (mock.Mock(fetch=lambda *a, **k: page, name="http"), False)
+        self.assertEqual(len(scr.search("plain query", engine="duckduckgo", fallback=False)), 1)
+
+
 @unittest.skipUnless(http_available()[0], "needs the http extra")
-class TestExtractionFromFixtures(unittest.TestCase):
+class TestExtractionFromFixtures(HermeticTestCase):
     """Extractors run against recorded markup: no browser, no network."""
 
     def _extract(self, engine):
@@ -138,7 +348,7 @@ class TestExtractionFromFixtures(unittest.TestCase):
                                  f"{engine} snippets flag disagrees with its markup")
 
 
-class TestEngineCapabilities(unittest.TestCase):
+class TestEngineCapabilities(HermeticTestCase):
     def test_every_engine_declares_its_capabilities(self):
         for name, spec in ENGINE_SPECS.items():
             with self.subTest(engine=name):
@@ -168,7 +378,7 @@ class TestEngineCapabilities(unittest.TestCase):
             AdvancedSearchScraper(transport="carrier-pigeon")
 
 
-class TestSearchSemantics(unittest.TestCase):
+class TestSearchSemantics(HermeticTestCase):
     """search() drives the chain without touching the network here."""
 
     def _scraper(self, outcomes, **kw):
@@ -249,7 +459,7 @@ class TestSearchSemantics(unittest.TestCase):
         self.assertEqual(r.attempts, [])
 
 
-class TestExport(unittest.TestCase):
+class TestExport(HermeticTestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.rows = [{"url": "https://a.com", "title": "A"},
@@ -275,7 +485,7 @@ class TestExport(unittest.TestCase):
         self.assertFalse(scr.export(os.path.join(self.tmp, "r.txt"), self.rows))
 
 
-class TestLibrarySilence(unittest.TestCase):
+class TestLibrarySilence(HermeticTestCase):
     """A library embedded in someone else's daemon must not print uninvited."""
 
     def tearDown(self):
@@ -334,7 +544,7 @@ class TestLibrarySilence(unittest.TestCase):
         self.assertIn("routed to the app", records)
 
 
-class TestUserAgent(unittest.TestCase):
+class TestUserAgent(HermeticTestCase):
     def test_default_ua_matches_this_machine(self):
         ua = default_user_agent()
         self.assertIn("Chrome/", ua)
@@ -361,7 +571,7 @@ class TestUserAgent(unittest.TestCase):
             hl.quit()
 
 
-class TestProxyPlumbing(unittest.TestCase):
+class TestProxyPlumbing(HermeticTestCase):
     def test_headless_accepts_a_proxy(self):
         hl = Headless(proxy="socks5://127.0.0.1:9050")
         try:
@@ -386,7 +596,7 @@ class TestProxyPlumbing(unittest.TestCase):
                       captured.get("additional_args", []))
 
 
-class TestDriverRecovery(unittest.TestCase):
+class TestDriverRecovery(HermeticTestCase):
     def test_a_dead_session_is_rebuilt_rather_than_poisoning_every_call(self):
         scr = AdvancedSearchScraper(transport="browser")
         dead = mock.Mock()
@@ -411,7 +621,7 @@ class TestDriverRecovery(unittest.TestCase):
         self.assertIsNone(scr.driver)
 
 
-class TestScraperPool(unittest.TestCase):
+class TestScraperPool(HermeticTestCase):
     def test_each_thread_gets_its_own_scraper(self):
         import threading
         pool = ScraperPool(size=3, transport="http")
@@ -449,7 +659,7 @@ class TestScraperPool(unittest.TestCase):
         scraper.quit.assert_called_once()
 
 
-class TestBatchHonesty(unittest.TestCase):
+class TestBatchHonesty(HermeticTestCase):
     def test_browser_batches_are_not_pretended_to_be_parallel(self):
         # One WebDriver session cannot be driven from several threads, so a
         # browser-backed batch must not claim concurrency it cannot deliver.
@@ -481,7 +691,7 @@ class TestBatchHonesty(unittest.TestCase):
         self.assertFalse(out["bad"])
 
 
-class TestPackaging(unittest.TestCase):
+class TestPackaging(HermeticTestCase):
     def test_version_is_exposed(self):
         self.assertTrue(__version__)
         self.assertRegex(__version__, r"^\d+\.\d+")

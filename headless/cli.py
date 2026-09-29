@@ -16,7 +16,7 @@ import logging
 from .ui import Console
 from .logs import enable_console_logging, get_logger
 from .core import find_chromedriver_path, find_chrome_binary, chrome_version
-from .transport import http_available
+from .transport import http_available, impersonate_available
 from .manager import ExtendedHeadless
 from .results import STATUS_OK
 from .scraper import (
@@ -24,6 +24,9 @@ from .scraper import (
     ENGINE_SPECS,
     DEFAULT_ENGINE,
     DEFAULT_FALLBACK_ENGINES,
+    DEFAULT_AGGREGATE_ENGINES,
+    TRANSPORTS,
+    BROWSERLESS_TRANSPORTS,
 )
 
 EXIT_OK = 0
@@ -93,6 +96,11 @@ def cmd_search(args, con: Console) -> int:
         transport=args.transport,
         proxy=args.proxy,
         headless_options={"page_load_timeout": args.timeout},
+        mode=args.mode,
+        region=args.region,
+        deadline=args.deadline,
+        aggregate_engines=(args.engines.split(",") if args.engines else None),
+        browser=args.browser,
     )
     try:
         started = time.time()
@@ -100,7 +108,9 @@ def cmd_search(args, con: Console) -> int:
             response = scraper.search(args.query)
         else:
             con.rule(f"search {con.sym('arrow')} {args.query}")
-            with con.spinner(f"querying {args.engine}"):
+            label = (f"asking {', '.join(scraper.aggregate_engines)} at once"
+                     if args.mode == "aggregate" else f"querying {args.engine}")
+            with con.spinner(label):
                 response = scraper.search(args.query)
         results = list(response)
         elapsed = time.time() - started
@@ -117,8 +127,14 @@ def cmd_search(args, con: Console) -> int:
                 con.fail("every engine refused this query",
                          f"{len(response.attempts)} tried")
                 for a in response.attempts:
-                    con.note(f"{a.engine}: {a.status} {a.reason}".rstrip())
+                    con.note(str(a))
                 con.note("try a proxy, a different network, or wait and retry")
+            elif response.cooling:
+                con.warn("every eligible engine is cooling down after refusals",
+                         "nothing was asked")
+                for s in response.skipped:
+                    con.note(f"{s['engine']}: {s['reason']} "
+                             f"({s.get('resume_in', 0):.0f}s)")
             else:
                 con.fail("no results", f"tried {len(response.attempts)} engines")
                 con.note("run 'headless-driver doctor' to check connectivity")
@@ -127,7 +143,13 @@ def cmd_search(args, con: Console) -> int:
         for index, item in enumerate(results, 1):
             number = con.style(f"{index:>2}.", "grey")
             title = con.style(item.get("title") or "(untitled)", "bold")
-            con.write(f" {number} {title}")
+            votes = item.get("votes")
+            badge = ""
+            if votes:
+                colour = "green" if votes > 1 else "grey"
+                badge = " " + con.style(f"[{votes} {'engine' if votes == 1 else 'engines'}: "
+                                        f"{', '.join(item.get('engines', []))}]", colour)
+            con.write(f" {number} {title}{badge}")
             con.write(f"     {con.style(item.get('url', ''), 'cyan', 'underline')}")
             snippet = " ".join((item.get("snippet") or "").split())
             if snippet:
@@ -135,13 +157,19 @@ def cmd_search(args, con: Console) -> int:
             con.write()
 
         skipped = [a for a in response.attempts if a.status != STATUS_OK]
+        via = (", ".join(response.engines) if response.mode == "aggregate"
+               else response.engine)
         con.write(" ".join([
             con.style(f" {len(results)} results", "green", "bold"),
-            con.style(f"via {response.engine}", "grey"),
-            con.style(f"in {elapsed:.1f}s", "grey"),
+            con.style(f"via {via}", "cyan"),
+            con.style(f"in {elapsed:.2f}s", "grey"),
         ]))
         if skipped:
-            con.note("skipped " + ", ".join(f"{a.engine} ({a.status})" for a in skipped))
+            con.note("also tried " + ", ".join(
+                f"{a.engine} ({a.status})" for a in skipped))
+        if response.skipped:
+            con.note("not asked " + ", ".join(
+                f"{s['engine']} ({s['reason']})" for s in response.skipped))
         if args.save:
             saved = scraper.export(args.save)
             (con.ok if saved else con.fail)(
@@ -155,9 +183,13 @@ def cmd_engines(args, con: Console) -> int:
     if args.json:
         json.dump({"default": DEFAULT_ENGINE,
                    "chain": [DEFAULT_ENGINE] + DEFAULT_FALLBACK_ENGINES,
+                   "aggregate": list(DEFAULT_AGGREGATE_ENGINES),
                    "engines": {n: {"url": sp["url"],
+                                   "method": sp.get("method", "GET"),
                                    "js": bool(sp.get("js", True)),
-                                   "snippets": bool(sp.get("snippets", True))}
+                                   "snippets": bool(sp.get("snippets", True)),
+                                   "honors_site": sp.get("honors_site"),
+                                   "provider": sp.get("provider")}
                                for n, sp in ENGINE_SPECS.items()}},
                   sys.stdout, indent=2)
         sys.stdout.write("\n")
@@ -172,14 +204,19 @@ def cmd_engines(args, con: Console) -> int:
             str(position) if position else "-",
             name + (" (default)" if name == DEFAULT_ENGINE else ""),
             urlparse(spec["url"]).netloc,
-            "browser" if spec.get("js", True) else "http",
-            "yes" if spec.get("snippets", True) else "no",
+            con.style("browser", "yellow") if spec.get("js", True)
+            else con.style("http", "green"),
+            "yes" if spec.get("snippets", True) else con.style("no", "grey"),
+            con.style("yes", "green") if spec.get("honors_site")
+            else con.style("no", "red"),
+            spec.get("provider") or name,
         ])
     rows.sort(key=lambda r: (r[0] == "-", int(r[0]) if r[0].isdigit() else 99))
-    con.table(["#", "engine", "endpoint", "needs", "snippets"], rows,
-              styles=["grey", "bold", "cyan", "", ""])
+    con.table(["#", "engine", "endpoint", "needs", "snippets", "site:", "index"], rows,
+              styles=["grey", "bold", "cyan", "", "", "", "magenta"])
     con.write()
     con.note(f"tried in order: {' → '.join(chain)}")
+    con.note(f"aggregate mode asks: {', '.join(DEFAULT_AGGREGATE_ENGINES)}")
     return EXIT_OK
 
 
@@ -204,14 +241,15 @@ def cmd_engine_check(args, con: Console) -> int:
 
     for name in sorted(ENGINE_SPECS):
         spec = ENGINE_SPECS[name]
-        if args.transport == "http" and spec.get("js", True):
+        if args.transport in BROWSERLESS_TRANSPORTS and spec.get("js", True):
             # Not a failure: this engine simply cannot be served without a browser.
             rows.append([name, "skipped", "-", "-", "-", "-"])
             continue
         scraper = AdvancedSearchScraper(
             max_results=3, search_engine=name, fallback=False,
             transport=args.transport, proxy=args.proxy,
-            page_load_timeout=args.timeout, verbose=args.verbose)
+            page_load_timeout=args.timeout, verbose=args.verbose,
+            circuit_breaker=False, withdraw_browser_on_block=False)
         try:
             with con.spinner(f"checking {name}"):
                 response = scraper.search(probe)
@@ -221,6 +259,8 @@ def cmd_engine_check(args, con: Console) -> int:
             snippets = sum(1 for r in response if r.get("snippet"))
             if status == STATUS_OK and titles:
                 healthy += 1
+            if attempt and attempt.http_status and attempt.http_status >= 400:
+                status = f"{status} ({attempt.http_status})"
             rows.append([
                 name,
                 status,
@@ -303,10 +343,32 @@ def cmd_doctor(args, con: Console) -> int:
                + ("" if matched else " - a matching driver will be downloaded"),
                fatal=False)
 
-    ok, why = http_available()
-    record(True, "http transport",
-           "available (browserless mode enabled)" if ok else f"{why} - install headless-driver[http]",
+    imp_ok, imp_why = impersonate_available()
+    http_ok, why = http_available()
+    if imp_ok:
+        import curl_cffi
+        record(True, "impersonate transport",
+               f"curl_cffi {getattr(curl_cffi, '__version__', '?')} - browser TLS "
+               "fingerprint (used by transport=auto)")
+    else:
+        record(False, "impersonate transport",
+               f"{imp_why} - install headless-driver[impersonate]", fatal=False)
+    record(http_ok or imp_ok, "http transport",
+           ("available" + ("" if imp_ok else " (used by transport=auto)")) if http_ok
+           else f"{why} - install headless-driver[http]",
            fatal=False)
+    if http_ok and not imp_ok:
+        con.warn("TLS fingerprint will not match the User-Agent",
+                 "expect blocks from datacentre IPs; pip install \"headless-driver[impersonate]\"")
+
+    try:
+        from .playwright_driver import playwright_available
+        pw_ok, pw_why = playwright_available()
+    except Exception as e:  # pragma: no cover
+        pw_ok, pw_why = False, str(e)
+    record(True if pw_ok else False, "playwright",
+           "available (browser='playwright', extract)" if pw_ok
+           else f"{pw_why} (optional) - install headless-driver[playwright]", fatal=False)
 
     for module, label in (("webdriver_manager", "webdriver-manager"),
                           ("selenium_stealth", "selenium-stealth")):
@@ -354,7 +416,30 @@ def cmd_doctor(args, con: Console) -> int:
     return EXIT_OK if not failed else EXIT_FAILED
 
 
+def _capture_playwright(args, con: Console, kind: str) -> int:
+    from .playwright_driver import PlaywrightBrowser
+    options = {"headless": not args.show, "proxy": args.proxy, "timeout": args.timeout}
+    if args.window:
+        options["viewport"] = args.window
+    try:
+        con.rule(f"{kind} {con.sym('arrow')} {args.url} (playwright)")
+        with PlaywrightBrowser(**options) as browser, con.spinner("loading page"):
+            saved = (browser.screenshot(args.url, args.output, full_page=args.full_page)
+                     if kind == "screenshot" else browser.pdf(args.url, args.output))
+        if not saved:
+            con.fail(f"could not write {args.output}")
+            return EXIT_FAILED
+        con.ok(args.url, f"{os.path.getsize(args.output) / 1024:.0f} KB")
+        con.write(f"     {con.style(os.path.abspath(args.output), 'cyan')}")
+        return EXIT_OK
+    except Exception as e:
+        con.fail(kind, f"{type(e).__name__}: {e}")
+        return EXIT_FAILED
+
+
 def _capture(args, con: Console, kind: str) -> int:
+    if getattr(args, "browser", "selenium") == "playwright":
+        return _capture_playwright(args, con, kind)
     hl = ExtendedHeadless(auto_install=True, chrome_binary_path=None,
                           verbose=args.verbose, **_driver_options(args))
     try:
@@ -379,6 +464,43 @@ def _capture(args, con: Console, kind: str) -> int:
         hl.quit()
 
 
+def _field(text: str):
+    name, sep, selector = text.partition("=")
+    if not sep or not name or not selector:
+        raise argparse.ArgumentTypeError("fields look like name=css or name=css@attr")
+    return name.strip(), selector.strip()
+
+
+def cmd_extract(args, con: Console) -> int:
+    """Structured extraction from any page, through Playwright."""
+    from .playwright_driver import PlaywrightBrowser
+    schema = dict(args.field)
+    try:
+        with PlaywrightBrowser(headless=not args.show, proxy=args.proxy,
+                               timeout=args.timeout) as browser:
+            if args.json:
+                data = browser.extract(args.url, schema, item_selector=args.item,
+                                       scroll=args.scroll)
+            else:
+                con.rule(f"extract {con.sym('arrow')} {args.url}")
+                with con.spinner("rendering page"):
+                    data = browser.extract(args.url, schema, item_selector=args.item,
+                                           scroll=args.scroll)
+    except Exception as e:
+        con.fail("extract", f"{type(e).__name__}: {e}")
+        return EXIT_FAILED
+    rows = data if isinstance(data, list) else [data]
+    if args.json:
+        json.dump(data, sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+    else:
+        con.table(list(schema), [[row.get(k, "") for k in schema] for row in rows],
+                  styles=["bold"] + ["" for _ in list(schema)[1:]])
+        con.write()
+        con.ok(f"{len(rows)} {'row' if len(rows) == 1 else 'rows'}")
+    return EXIT_OK if any(any(r.values()) for r in rows) else EXIT_FAILED
+
+
 def cmd_shot(args, con: Console) -> int:
     return _capture(args, con, "screenshot")
 
@@ -391,7 +513,9 @@ def cmd_pdf(args, con: Console) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="headless-driver",
-        description="Headless Chrome automation and search scraping.",
+        description="Fast multi-engine search scraper (Brave, DuckDuckGo, Yahoo, "
+                    "Mojeek, Google, Bing...) with browser TLS impersonation, "
+                    "plus headless Chrome automation.",
     )
     parser.add_argument("--version", action="version", version=_version())
     parser.add_argument("--no-color", action="store_true", help="disable coloured output")
@@ -407,8 +531,18 @@ def build_parser() -> argparse.ArgumentParser:
                         help="do not try other engines if this one fails")
     search.add_argument("--save", metavar="PATH", help="also write results to .json or .csv")
     search.add_argument("--timeout", type=float, default=20.0, help="page load timeout")
-    search.add_argument("--transport", choices=("auto", "http", "browser"), default="auto",
-                        help="how to fetch pages; http skips the browser entirely")
+    search.add_argument("--transport", choices=TRANSPORTS, default="auto",
+                        help="how to fetch pages; impersonate/http skip the browser")
+    search.add_argument("--mode", choices=("first", "aggregate"), default="first",
+                        help="first: walk the chain; aggregate: ask several engines "
+                             "at once and rank by agreement")
+    search.add_argument("--engines", metavar="LIST",
+                        help="comma-separated engines for --mode aggregate")
+    search.add_argument("--deadline", type=float, default=8.0,
+                        help="seconds to wait for engines in aggregate mode")
+    search.add_argument("--region", help="region such as uk-en or us-en")
+    search.add_argument("--browser", choices=("selenium", "playwright"), default="selenium",
+                        help="browser for engines that need JavaScript")
     search.add_argument("--proxy", help="proxy server, e.g. socks5://127.0.0.1:9050")
     search.add_argument("--json", action="store_true", help="print JSON instead")
     search.set_defaults(func=cmd_search)
@@ -422,11 +556,31 @@ def build_parser() -> argparse.ArgumentParser:
                         help="query every engine and report which still parse")
     doctor.add_argument("--query", default="wikipedia",
                         help="probe query for --engines")
-    doctor.add_argument("--transport", choices=("auto", "http", "browser"), default="auto",
+    doctor.add_argument("--transport", choices=TRANSPORTS, default="auto",
                         help="how to fetch pages for --engines")
     doctor.add_argument("--proxy", help="proxy server to test through")
     doctor.add_argument("--timeout", type=float, default=20.0, help="page load timeout")
     doctor.set_defaults(func=cmd_doctor)
+
+    extract = sub.add_parser("extract", help="pull structured data out of a page (playwright)")
+    extract.add_argument("url", help="page to load")
+    extract.add_argument("-f", "--field", action="append", type=_field, required=True,
+                         metavar="NAME=CSS[@ATTR]",
+                         help="a field to read, e.g. title=h2 or link=a@href (repeatable)")
+    extract.add_argument("--item", metavar="CSS",
+                         help="apply the fields inside every element matching this")
+    extract.add_argument("--scroll", type=int, default=0,
+                         help="scroll to the bottom this many times first")
+    extract.add_argument("--proxy", help="proxy server; user:pass@ credentials work")
+    extract.add_argument("--timeout", type=float, default=30.0, help="page load timeout")
+    extract.add_argument("--show", action="store_true", help="show the browser window")
+    extract.add_argument("--json", action="store_true", help="print JSON instead")
+    extract.set_defaults(func=cmd_extract)
+
+    from . import bench as _bench
+    bench = sub.add_parser("bench", help="measure which engines answer from this address")
+    _bench.build_parser(bench)
+    bench.set_defaults(func=lambda a, c: _bench.main_with_args(a, c))
 
     for name, help_text, default_out in (
         ("shot", "save a screenshot of a page", "screenshot.png"),
@@ -438,6 +592,12 @@ def build_parser() -> argparse.ArgumentParser:
         cmd.add_argument("--window", type=_window_size, metavar="WxH",
                          help="browser window size, e.g. 1280x720")
         cmd.add_argument("--proxy", help="proxy server, e.g. socks5://127.0.0.1:9050")
+        cmd.add_argument("--show", action="store_true",
+                         help="show the browser window instead of running headless")
+        cmd.add_argument("--browser", choices=("selenium", "playwright"), default="selenium",
+                         help="which browser automation to capture with")
+        cmd.add_argument("--full-page", action="store_true",
+                         help="capture the whole scrollable page (playwright)")
         cmd.add_argument("--timeout", type=float, default=30.0, help="page load timeout")
         cmd.set_defaults(func=cmd_shot if name == "shot" else cmd_pdf)
 
@@ -455,7 +615,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     color = False if (args.no_color or getattr(args, "json", False)) else None
     con = Console(color=color)
     # The library is silent unless asked; the CLI is the caller doing the asking.
-    enable_console_logging(logging.DEBUG if args.verbose else logging.WARNING)
+    enable_console_logging(logging.DEBUG if args.verbose else logging.WARNING,
+                           third_party=True, capture_warnings=True,
+                           timestamps=args.verbose)
     try:
         return args.func(args, con)
     except KeyboardInterrupt:

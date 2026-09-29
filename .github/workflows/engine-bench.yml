@@ -1,0 +1,51 @@
+name: engine health
+
+# GitHub-hosted runners are Azure addresses: the same kind of datacentre IP
+# that cloud deployments scrape from. Measuring from here catches selector rot
+# and new blocks before users report them.
+on:
+  schedule:
+    - cron: "17 6 * * 1"   # Mondays 06:17 UTC
+  workflow_dispatch:
+    inputs:
+      min_ok_rate:
+        description: "fail if any engine/transport answers less often than this"
+        default: "0.25"
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install ".[impersonate,http]"
+
+      - name: Per-engine health matrix
+        run: |
+          headless-driver bench --transports impersonate,http --limit 10 \
+            --min-ok-rate "${{ github.event.inputs.min_ok_rate || '0.25' }}" --json > bench.json || status=$?
+          python - <<'EOF'
+          import json, os
+          data = json.load(open("bench.json"))
+          lines = ["| engine | transport | ok | empty | blocked | unparsed | p50 ms |",
+                   "|---|---|---|---|---|---|---|"]
+          for c in data["cells"]:
+              lines.append(f"| {c['engine']} | {c['transport']} | {c['ok']} | {c['empty']} | "
+                           f"{c['blocked']} | {c['unparsed']} | {c['p50_ms']} |")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("### Engine health from a datacentre address\n\n" + "\n".join(lines) + "\n")
+          EOF
+          exit ${status:-0}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: engine-bench
+          path: bench.json

@@ -264,7 +264,8 @@ class Headless:
             if self.verbose:
                 log.debug(f"[Headless] WebDriver startup failed: {e}")
             if isinstance(e, SessionNotCreatedException):
-                log.debug("ChromeDriver and Chrome browser versions are incompatible. Please update ChromeDriver to match your browser version.", "error")
+                log.error("ChromeDriver and Chrome browser versions are incompatible. "
+                          "Please update ChromeDriver to match your browser version.")
             elif isinstance(e, WebDriverException):
                 log.error(f"WebDriver error: {e}")
             else:

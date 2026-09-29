@@ -261,7 +261,7 @@ class MultiDriverManager:
             try:
                 inst.quit()
             except Exception as e:
-                log.debug(f"Error quitting instance '{name}': {e}", "warn")
+                log.warning("error quitting instance %r: %s", name, e)
             if self.verbose:
                 log.debug("[MultiDriverManager] Instance %s quit.", name)
 

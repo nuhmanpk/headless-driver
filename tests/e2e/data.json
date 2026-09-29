@@ -1,0 +1,53 @@
+{
+  "_comment": "Ground truth for the end-to-end suite. Every page under site/ is generated from this file by build_site.py; the tests scrape those pages and must get exactly these values back. `title_html`/`snippet_html`/`href` are what the pages contain; `url`/`title`/`snippet` are what the scraper must return after unescaping, Unicode cleanup and URL tidying.",
+  "results": [
+    {
+      "url": "https://www.linkedin.com/in/jane-doe-credo",
+      "title": "Jane Doe - Partner - Credo Capital | LinkedIn",
+      "title_html": "Jane Doe - Partner - Credo Capital | LinkedIn",
+      "snippet": "Jane Doe. Partner at Credo Capital. London, England, United Kingdom. 500+ connections.",
+      "snippet_html": "Jane Doe. Partner at Credo Capital. London, England, United Kingdom. 500+ connections."
+    },
+    {
+      "url": "https://uk.linkedin.com/in/jonnie-quinn",
+      "title": "Jonnie Quinn & Co - Credo Capital | LinkedIn",
+      "title_html": "Jonnie Quinn &amp; Co - Credo Capital | LinkedIn",
+      "snippet": "Managing Director at Credo Capital. Experience: Credo Capital, Barclays.",
+      "snippet_html": "Managing​ Director at Credo Capital.  Experience: Credo Capital,   Barclays."
+    },
+    {
+      "url": "https://www.linkedin.com/in/José-garcía",
+      "href": "https://www.linkedin.com/in/Jos%C3%A9-garc%C3%ADa",
+      "title": "José García - Analyst | LinkedIn",
+      "title_html": "José Garc&iacute;a - Analyst | LinkedIn",
+      "snippet": "Analyst at Credo Capital. Madrid, Spain.",
+      "snippet_html": "Analyst at Credo Capital. Madrid, Spain."
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/Python_(programming_language)",
+      "title": "Python (programming language) - Wikipedia",
+      "title_html": "Python (programming language) - Wikipedia",
+      "snippet": "Python is a high-level, general-purpose programming language.",
+      "snippet_html": "Python is a high-level, general-purpose programming language."
+    },
+    {
+      "url": "https://www.python.org/",
+      "title": "Welcome to Python.org",
+      "title_html": "Welcome to Python.org",
+      "snippet": "The official home of the Python Programming Language.",
+      "snippet_html": "The official home of the Python Programming Language."
+    },
+    {
+      "url": "https://www.example.com/about",
+      "title": "About Example Domain",
+      "title_html": "About <b>Example</b> Domain",
+      "snippet": "This domain is for use in illustrative examples in documents.",
+      "snippet_html": "This domain is for use in <b>illustrative</b> examples in documents."
+    }
+  ],
+  "ad": {
+    "title": "Sponsored: Buy Credo Capital leads",
+    "snippet": "This is an advert and must never be returned."
+  },
+  "startpage_token": "e2e-sc-token-2026"
+}

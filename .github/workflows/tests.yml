@@ -23,16 +23,79 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install package
+      - name: Install package with every extra
         run: |
           python -m pip install --upgrade pip
-          pip install -e .
+          pip install -e ".[dev,fast]"
+          python -m playwright install --with-deps chromium
 
-      - name: Run tests
+      - name: Run tests with coverage
         # Live engine tests are skipped: search engines serve CAPTCHAs to CI
         # addresses, so a block there would fail the build without anything
-        # being broken. Everything else runs, including the browser-driven
-        # tests, which use local HTML fixtures rather than the network.
+        # being broken. Everything else runs — including the browser and
+        # Playwright tests and the end-to-end suite, which scrape a local
+        # site rather than the network.
         env:
           SKIP_LIVE_TESTS: "1"
-        run: python -m unittest discover -s tests -v
+        run: |
+          coverage run -m unittest discover -s tests -v
+          coverage report
+          coverage xml
+
+      - name: Coverage summary
+        if: matrix.python-version == '3.12'
+        run: |
+          echo '### Coverage' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          coverage report --skip-covered >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage to Codecov
+        if: matrix.python-version == '3.12'
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.xml
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  e2e-installed:
+    # Build the wheel, install it into a clean environment, and scrape the
+    # end-to-end site with it — proving the artefact users get from PyPI works,
+    # not just the source tree.
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build the wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel --outdir dist
+
+      - name: Install the wheel into a fresh virtualenv
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          if [ -x "$RUNNER_TEMP/venv/bin/python" ]; then PY="$RUNNER_TEMP/venv/bin/python"; else PY="$RUNNER_TEMP/venv/Scripts/python.exe"; fi
+          echo "PY=$PY" >> "$GITHUB_ENV"
+          "$PY" -m pip install --upgrade pip
+          WHEEL="$(ls dist/*.whl)"
+          "$PY" -m pip install "${WHEEL}[impersonate,http,playwright]"
+          "$PY" -m playwright install --with-deps chromium
+          "$PY" -m headless.cli --version
+
+      - name: Scrape the local site with the installed package
+        shell: bash
+        env:
+          E2E_REQUIRE_INSTALLED: "1"
+        run: |
+          cp -R tests/e2e "$RUNNER_TEMP/e2e"
+          cd "$RUNNER_TEMP"
+          "$PY" -m unittest discover -s "$RUNNER_TEMP/e2e" -t "$RUNNER_TEMP/e2e" -v

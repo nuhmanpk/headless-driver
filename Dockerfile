@@ -6,6 +6,7 @@
 #
 #   docker build -t headless-driver .
 #   docker run --rm --shm-size=1g headless-driver search "python headless"
+#   docker run --rm headless-driver search "site:linkedin.com/in jane doe" --mode aggregate
 #
 # --shm-size matters: Chrome's default /dev/shm in Docker is 64 MB and it will
 # crash on real pages without it. --disable-dev-shm-usage is already set, which
@@ -54,7 +55,9 @@ RUN set -eux; \
 RUN useradd --create-home --home-dir /home/app app
 WORKDIR /app
 
-RUN pip install --no-cache-dir "headless-driver[http]"
+# [impersonate] gives a real browser TLS fingerprint, which is what gets
+# answers from cloud addresses; [http] is the plain-requests fallback.
+RUN pip install --no-cache-dir "headless-driver[impersonate,http,fast]"
 
 USER app
 ENV CHROME_DRIVER_PATH=/usr/local/bin/chromedriver

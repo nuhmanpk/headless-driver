@@ -1,15 +1,19 @@
 [build-system]
-requires = ["setuptools>=61", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "headless-driver"
-version = "1.0.0"
-description = "Headless Chrome automation and multi-engine search scraper - DuckDuckGo, Bing, Google and more with automatic fallback, block detection, optional browserless HTTP mode, proxy, stealth, screenshots, PDF export and a CLI."
+version = "1.1.0"
+description = "Fast Python search scraper for Brave, DuckDuckGo, Yahoo, Mojeek, Google and Bing: browser TLS impersonation, multi-engine consensus ranking, block detection and circuit breakers; results in under a second without a browser. Also headless Chrome and Playwright automation, screenshots, PDF and a CLI."
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
+  { name = "nuhmanpk", email = "nuhmanpk7@gmail.com" }
+]
+maintainers = [
   { name = "nuhmanpk", email = "nuhmanpk7@gmail.com" }
 ]
 dependencies = [
@@ -20,55 +24,93 @@ dependencies = [
 ]
 
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 5 - Production/Stable",
   "Environment :: Console",
   "Intended Audience :: Developers",
   "Intended Audience :: Information Technology",
   "Intended Audience :: Science/Research",
-  "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.9",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+  "Topic :: Internet :: WWW/HTTP :: Browsers",
+  "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Scientific/Engineering :: Information Analysis",
   "Topic :: Software Development :: Libraries",
   "Topic :: Software Development :: Libraries :: Python Modules",
   "Topic :: Software Development :: Testing",
-  "Topic :: Internet :: WWW/HTTP :: Browsers",
-  "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
   "Topic :: Text Processing :: Indexing",
   "Topic :: Utilities",
   "Typing :: Typed"
 ]
 
 keywords = [
-  "search-scraper", "search-engine-scraper", "search-scraping", "serp",
-  "serp-scraper", "search-results", "web-scraping", "scraper", "scraping",
-  "duckduckgo", "bing", "google-search", "mojeek", "startpage", "yandex",
-  "selenium", "headless", "headless-browser", "headless-chrome", "chrome",
+  "search-scraper", "search-engine-scraper", "serp-scraper", "serp", "serp-api",
+  "web-search", "web-search-api", "search-api", "metasearch", "search-results",
+  "google-search", "google-scraper", "bing-search", "duckduckgo", "duckduckgo-search",
+  "brave-search", "yahoo-search", "mojeek", "startpage", "yandex", "ddgs",
+  "web-scraping", "scraper", "scraping", "crawler", "linkedin-scraper",
+  "tls-fingerprint", "impersonate", "curl-cffi", "anti-bot", "anti-detection",
+  "stealth", "captcha-detection", "rate-limit", "circuit-breaker", "proxy",
+  "selenium", "playwright", "headless", "headless-browser", "headless-chrome",
   "chromium", "webdriver", "chromedriver", "browser-automation", "automation",
-  "screenshot", "pdf-export", "stealth", "anti-detection", "proxy", "crawler",
-  "cli",
+  "screenshot", "pdf-export", "llm", "llm-tools", "ai-agents", "rag",
+  "retrieval-augmented-generation", "agent-tools", "cli",
 ]
 
 [project.optional-dependencies]
-# Tooling for building and validating a release, not needed at runtime:
-#   pip install -e ".[dev]"
-# Fetch server-rendered engines over HTTP instead of driving a browser:
-# much faster, far less memory, and thread-safe.
+# Browser-impersonating HTTP (curl_cffi): a real Chrome/Safari/Firefox TLS and
+# HTTP/2 fingerprint. The one to use from cloud/datacentre addresses, and what
+# transport="auto" prefers.
+#   pip install "headless-driver[impersonate]"
+impersonate = [
+  "curl_cffi>=0.7",
+  "beautifulsoup4>=4.12",
+]
+# Plain-requests browserless mode: portable, but fingerprinted as Python.
 #   pip install "headless-driver[http]"
 http = [
   "requests>=2.31",
   "beautifulsoup4>=4.12",
 ]
+# Playwright as the browser backend, plus extract/capture_json. Then run:
+#   playwright install chromium
+playwright = [
+  "playwright>=1.40",
+  "beautifulsoup4>=4.12",
+]
+# Faster HTML parsing at volume; used automatically when installed.
+fast = [
+  "lxml>=4.9",
+]
+# Everything above.
+all = [
+  "curl_cffi>=0.7",
+  "requests>=2.31",
+  "beautifulsoup4>=4.12",
+  "playwright>=1.40",
+  "lxml>=4.9",
+]
+# Tooling for tests, coverage and releases, not needed at runtime:
+#   pip install -e ".[dev]"
 dev = [
   "build>=1.0",
   "twine>=5.0",
   "trove-classifiers",
+  "coverage[toml]>=7.4",
   "requests>=2.31",
   "beautifulsoup4>=4.12",
+  "curl_cffi>=0.7",
+  "playwright>=1.40",
 ]
 
 [project.scripts]
@@ -77,8 +119,12 @@ headless-driver = "headless.cli:main"
 [project.urls]
 Homepage = "https://github.com/nuhmanpk/headless-driver"
 Documentation = "https://github.com/nuhmanpk/headless-driver/blob/main/DOCS.md"
+Changelog = "https://github.com/nuhmanpk/headless-driver/blob/main/CHANGELOG.md"
+Roadmap = "https://github.com/nuhmanpk/headless-driver/blob/main/TODO.md"
+"LLM docs" = "https://github.com/nuhmanpk/headless-driver/blob/main/llms.txt"
 Source = "https://github.com/nuhmanpk/headless-driver"
 Issues = "https://github.com/nuhmanpk/headless-driver/issues"
+Funding = "https://github.com/sponsors/nuhmanpk"
 
 [tool.setuptools.package-data]
 headless = ["py.typed"]
@@ -86,3 +132,19 @@ headless = ["py.typed"]
 [tool.setuptools.packages.find]
 include = ["headless*"]
 exclude = ["images*"]
+
+[tool.coverage.run]
+branch = true
+source = ["headless"]
+# Playwright's sync API runs on greenlets; without this their lines look unrun.
+concurrency = ["thread", "greenlet"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+fail_under = 85
+exclude_lines = [
+  "pragma: no cover",
+  "if __name__ == .__main__.:",
+  "raise NotImplementedError",
+]

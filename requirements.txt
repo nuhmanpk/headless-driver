@@ -1,4 +1,23 @@
+# Runtime dependencies of headless-driver, mirroring pyproject.toml.
+# Install the package itself with extras instead where you can:
+#   pip install "headless-driver[impersonate]"      # recommended
+#   pip install "headless-driver[all]"              # everything below
+
+# core (always installed)
 selenium==4.35.0
 webdriver-manager>=4.0.0
 selenium-stealth>=1.0.6
 geckodriver-autoinstaller>=0.1.0
+
+# [impersonate] browser TLS fingerprint; preferred by transport="auto"
+curl_cffi>=0.7
+beautifulsoup4>=4.12
+
+# [http] plain-requests browserless fallback
+requests>=2.31
+
+# [playwright] browser backend, extract, capture_json (then: playwright install chromium)
+playwright>=1.40
+
+# [fast] faster HTML parsing, used automatically when present
+lxml>=4.9

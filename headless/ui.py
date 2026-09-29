@@ -21,6 +21,7 @@ CODES = {
     "dim": "2",
     "italic": "3",
     "underline": "4",
+    "black": "30",
     "red": "31",
     "green": "32",
     "yellow": "33",
@@ -29,6 +30,20 @@ CODES = {
     "cyan": "36",
     "white": "37",
     "grey": "90",
+    "bright_red": "91",
+    "bright_green": "92",
+    "bright_yellow": "93",
+    "bright_blue": "94",
+    "bright_magenta": "95",
+    "bright_cyan": "96",
+    "bright_white": "97",
+    "bg_red": "41",
+    "bg_green": "42",
+    "bg_yellow": "43",
+    "bg_blue": "44",
+    "bg_magenta": "45",
+    "bg_cyan": "46",
+    "bg_grey": "100",
 }
 
 SPINNER_FRAMES = "\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f"
@@ -145,12 +160,23 @@ def visible_width(text: str) -> int:
     return width
 
 
+_ANSI_RE = re.compile(r"\033\[[0-9;]*[mK]")
+
+
+def strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
+
+
 def truncate(text: str, limit: int) -> str:
+    """Shorten `text` to `limit` visible characters, ANSI escapes excepted."""
     if limit <= 0:
         return ""
-    if len(text) <= limit:
+    if visible_width(text) <= limit:
         return text
-    return text[: max(0, limit - 1)] + "…"
+    # Cutting through an escape sequence would corrupt the terminal state, so
+    # a styled cell that does not fit loses its styling rather than its sanity.
+    plain = strip_ansi(text)
+    return plain[: max(0, limit - 1)] + "…"
 
 
 class Console:
@@ -188,9 +214,11 @@ class Console:
 
     def sym(self, name: str) -> str:
         fancy = {"ok": "✓", "fail": "✗", "warn": "!", "arrow": "→",
-                 "dot": "•", "line": "─", "bullet": "▸"}
+                 "dot": "•", "line": "─", "bullet": "▸", "info": "ℹ",
+                 "debug": "·", "cool": "❄"}
         plain = {"ok": "+", "fail": "x", "warn": "!", "arrow": "->",
-                 "dot": "*", "line": "-", "bullet": ">"}
+                 "dot": "*", "line": "-", "bullet": ">", "info": "i",
+                 "debug": ".", "cool": "~"}
         return (fancy if self.unicode else plain)[name]
 
     def write(self, text: str = "") -> None:
@@ -270,7 +298,7 @@ class Console:
             cells = []
             for i, (cell, w) in enumerate(zip(row, widths)):
                 text = truncate(cell, w)
-                pad = text.ljust(w) if i < count - 1 else text
+                pad = text + " " * max(0, w - visible_width(text)) if i < count - 1 else text
                 cells.append(self.style(pad, styles[i]) if styles and styles[i] else pad)
             self.write(" " + "  ".join(cells))
 
@@ -278,16 +306,128 @@ class Console:
         return Spinner(self, label)
 
 
-# Colour and marker for each diagnostic level.
+# Colour, marker and badge label for each diagnostic level.
 LEVELS = {
-    "debug": ("grey", ""),
-    "info": ("grey", ""),
-    "success": ("green", "ok"),
-    "warn": ("yellow", "warn"),
-    "error": ("red", "fail"),
+    "debug": ("magenta", "debug", "DEBUG"),
+    "info": ("bright_blue", "info", "INFO"),
+    "success": ("green", "ok", "OK"),
+    "warn": ("yellow", "warn", "WARN"),
+    "error": ("red", "fail", "ERROR"),
 }
 
+#: Badge colours: foreground on background, so the level reads at a glance.
+_BADGES = {
+    "debug": ("bright_magenta",),
+    "info": ("bright_blue", "bold"),
+    "success": ("black", "bg_green"),
+    "warn": ("black", "bg_yellow"),
+    "error": ("bright_white", "bg_red", "bold"),
+}
+
+#: Fixed colours for this package's own components, so "[scraper]" is always
+#: the same colour; anything else is assigned from the palette by name.
+_COMPONENT_COLOURS = {
+    "scraper": "cyan",
+    "transport": "bright_blue",
+    "health": "bright_magenta",
+    "core": "green",
+    "headless": "green",
+    "manager": "bright_green",
+    "extendedheadless": "bright_green",
+    "multidrivermanager": "bright_green",
+    "searchscraper": "cyan",
+    "cli": "bright_cyan",
+    "bench": "bright_yellow",
+}
+_PALETTE = ("cyan", "magenta", "blue", "green", "bright_cyan", "bright_magenta",
+            "bright_blue", "bright_green")
+
 _TAG_RE = re.compile(r"^\[([^\]]+)\]\s*")
+
+# Words worth a colour of their own wherever they appear in a message.
+_HIGHLIGHTS = (
+    (re.compile(r"https?://[^\s'\")]+"), ("bright_blue", "underline")),
+    (re.compile(r"\bHTTP [45]\d\d\b"), ("bright_red", "bold")),
+    (re.compile(r"\bHTTP [123]\d\d\b"), ("bright_green", "bold")),
+    (re.compile(r"\b(?:blocked|rate_limited|refused|captcha|unparsed|forbidden)\b",
+                re.I), ("bright_red", "bold")),
+    (re.compile(r"\b(?:cooling(?: down)?|timeout|unreachable|throttled|standing down)\b",
+                re.I), ("bright_yellow", "bold")),
+    (re.compile(r"\b(?:ok|answering again|healthy|recovered)\b"), ("bright_green", "bold")),
+    (re.compile(r"'[^'\n]{1,120}'|\"[^\"\n]{1,120}\""), ("bright_cyan",)),
+    (re.compile(r"(?<![\w.])\d+(?:\.\d+)?(?:ms|s|%| KB| MB)?(?![\w.])"), ("bold",)),
+)
+
+
+def component_colour(name: str) -> str:
+    """A stable colour for a component tag such as ``scraper``."""
+    key = name.strip().lower()
+    if key in _COMPONENT_COLOURS:
+        return _COMPONENT_COLOURS[key]
+    # A deterministic hash: Python's own is salted per process.
+    return _PALETTE[sum(ord(c) for c in key) % len(_PALETTE)]
+
+
+def highlight(con: "Console", text: str, base: Sequence[str] = ()) -> str:
+    """Colour `text` in `base`, picking out URLs, statuses, quotes and numbers.
+
+    Each highlighted span restores `base` after itself, so the rest of the
+    line keeps its level colour instead of dropping back to the default.
+    """
+    if not con.color:
+        return text
+    spans = []
+    taken = [False] * len(text)
+    for pattern, styles in _HIGHLIGHTS:
+        for m in pattern.finditer(text):
+            if any(taken[m.start():m.end()]):
+                continue
+            for i in range(m.start(), m.end()):
+                taken[i] = True
+            spans.append((m.start(), m.end(), styles))
+    spans.sort()
+    out, pos = [], 0
+    for start, end, styles in spans:
+        if start > pos:
+            out.append(con.style(text[pos:start], *base))
+        out.append(con.style(text[start:end], *styles))
+        pos = end
+    if pos < len(text):
+        out.append(con.style(text[pos:], *base))
+    return "".join(out)
+
+
+def render_diag(message: str, level: str = "info", con: Optional["Console"] = None,
+                timestamp: str = "", component: str = "") -> str:
+    """Build one coloured diagnostic line without writing it."""
+    con = con or Console(stream=sys.stderr)
+    colour, symbol, label = LEVELS.get(level, LEVELS["info"])
+    if level not in LEVELS:
+        level = "info"
+
+    # A leading "[Component]" tag gets its own colour so the message stands out.
+    tag = component
+    match = _TAG_RE.match(message)
+    if match:
+        tag = tag or match.group(1)
+        message = message[match.end():]
+
+    parts = []
+    if timestamp:
+        parts.append(con.style(timestamp, "grey"))
+    marker = con.sym(symbol)
+    if con.color:
+        parts.append(con.style(f"{marker} {label:<5}", *_BADGES[level]))
+    elif level in ("warn", "error", "success"):
+        # Plain output keeps only the markers that carry meaning.
+        parts.append(marker)
+    if tag:
+        parts.append(con.style(f"[{tag}]", component_colour(tag), "bold"))
+    body_style = (colour,) if level in ("warn", "error", "success") else ()
+    if level == "debug":
+        body_style = ("grey",)
+    parts.append(highlight(con, message, body_style))
+    return " ".join(p for p in parts if p)
 
 
 def diag(message: str, level: str = "info", stream=None) -> None:
@@ -299,18 +439,7 @@ def diag(message: str, level: str = "info", stream=None) -> None:
     the stream takes effect immediately.
     """
     con = Console(stream=stream if stream is not None else sys.stderr)
-    colour, symbol = LEVELS.get(level, LEVELS["info"])
-
-    # A leading "[Component]" tag is dimmed so the message itself stands out.
-    tag = ""
-    match = _TAG_RE.match(message)
-    if match:
-        tag = con.style(f"[{match.group(1)}]", "cyan")
-        message = message[match.end():]
-
-    marker = con.style(con.sym(symbol), colour, "bold") if symbol else ""
-    body = con.style(message, colour)
-    con.write(" ".join(p for p in (marker, tag, body) if p))
+    con.write(render_diag(message, level, con))
 
 
 def debug(message: str) -> None:

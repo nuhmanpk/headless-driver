@@ -8,6 +8,8 @@ tool. For a quick tour, see the [README](README.md).
   - [search](#search)
   - [engines](#engines)
   - [doctor](#doctor)
+  - [bench](#bench)
+  - [extract](#extract)
   - [shot and pdf](#shot-and-pdf)
   - [Colour, piping and exit codes](#colour-piping-and-exit-codes)
 - [Python API](#python-api)
@@ -20,6 +22,9 @@ tool. For a quick tour, see the [README](README.md).
   - [Console UI helpers](#console-ui-helpers)
 - [Search results](#search-results)
 - [Transports and browserless mode](#transports-and-browserless-mode)
+- [Aggregate mode](#aggregate-mode)
+- [Circuit breaker](#circuit-breaker)
+- [Playwright](#playwright)
 - [Parallel searching](#parallel-searching)
 - [Search engines](#search-engines)
 - [Timeouts](#timeouts)
@@ -33,17 +38,26 @@ tool. For a quick tour, see the [README](README.md).
 ## Install
 
 ```bash
-pip install headless-driver              # browser only
-pip install "headless-driver[http]"      # adds the browserless HTTP transport
+pip install "headless-driver[impersonate]"   # recommended
+pip install "headless-driver[http]"          # plain-requests browserless mode
+pip install "headless-driver[playwright]"    # Playwright backend; then: playwright install chromium
+pip install "headless-driver[fast]"          # lxml parser
+pip install "headless-driver[all]"           # all of the above
+pip install headless-driver                  # Selenium only
 ```
 
-The `http` extra is strongly recommended: most engines are server-rendered, and
-fetching those without a browser is roughly two orders of magnitude cheaper. See
+The `impersonate` extra is strongly recommended: most engines are
+server-rendered, and fetching those without a browser is roughly two orders of
+magnitude cheaper — and doing it with a real browser's TLS fingerprint is what
+gets answers from cloud addresses. See
 [Transports](#transports-and-browserless-mode).
 
-Requires Python 3.9+ and an installed Chrome or Chromium. A matching
-ChromeDriver is downloaded automatically when needed, so you usually do not
-have to install one yourself.
+`requirements.txt` lists every runtime dependency including the extras, and
+`requirements-dev.txt` adds the test and release tooling.
+
+Requires Python 3.9+. Browser automation needs an installed Chrome or Chromium
+(a matching ChromeDriver is downloaded automatically when needed) or, for the
+Playwright backend, `playwright install chromium`.
 
 From a checkout:
 
@@ -73,35 +87,55 @@ not `headless-driver search "x" -v`.
 | --- | --- |
 | `search QUERY` | Search the web and print results |
 | `engines` | List the engines and the fallback order |
-| `doctor` | Check Chrome, ChromeDriver and connectivity |
+| `doctor` | Check Chrome, ChromeDriver, transports and connectivity |
+| `bench` | Measure which engines answer from this address |
+| `extract URL` | Pull structured data out of a page (Playwright) |
 | `shot URL` | Save a screenshot |
 | `pdf URL` | Save the page as PDF |
+
+`python -m headless` is the same as `headless-driver`.
 
 ### search
 
 ```bash
 headless-driver search "python headless browser"
-headless-driver search "selenium stealth" -n 10 -e bing
+headless-driver search "selenium stealth" -n 10 -e yahoo
 headless-driver search "web scraping" --save results.csv
 headless-driver search "python" --json | jq -r '.results[].url'
+headless-driver search 'site:linkedin.com/in "jane doe"' --mode aggregate --region uk-en
 ```
 
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `-n`, `--number` | `5` | Results to return |
-| `-e`, `--engine` | `duckduckgo` | Engine to start with |
+| `-e`, `--engine` | `brave` | Engine to start with |
 | `--no-fallback` | off | Do not try other engines if this one fails |
+| `--mode` | `first` | `first` walks the chain; `aggregate` asks several engines at once and ranks by agreement |
+| `--engines LIST` | see [Aggregate mode](#aggregate-mode) | Comma-separated engines for `--mode aggregate` |
+| `--deadline` | `8.0` | Seconds to wait for engines in aggregate mode |
+| `--region` | – | Region such as `uk-en`, fed into each engine's parameters and cookies |
+| `--transport` | `auto` | `auto`, `impersonate`, `http` or `browser` |
+| `--browser` | `selenium` | `selenium` or `playwright`, for engines that need JavaScript |
+| `--proxy` | – | Proxy server URL |
 | `--save PATH` | – | Also write results to `.json` or `.csv` |
 | `--timeout` | `20.0` | Page load timeout in seconds |
 | `--json` | off | Print JSON instead of formatted output |
+
+In aggregate mode each result is printed with the engines that returned it,
+`[3 engines: brave, duckduckgo, mojeek]`, and engines that were not asked are
+listed with the reason (`cooling`, `ignores_site`, `duplicate_provider`).
 
 `--json` emits a single object:
 
 ```json
 {
   "query": "python headless",
-  "engine": "duckduckgo",
-  "elapsed": 4.7,
+  "engine": "brave",
+  "engines": ["brave"],
+  "mode": "first",
+  "elapsed": 0.9,
+  "blocked": false,
+  "cooling": false,
   "results": [
     {
       "url": "https://example.com/page",
@@ -110,9 +144,14 @@ headless-driver search "python" --json | jq -r '.results[].url'
       "favicon": "https://www.google.com/s2/favicons?domain=example.com",
       "cached": null,
       "quick_answer": null,
-      "engine": "duckduckgo"
+      "engine": "brave"
     }
-  ]
+  ],
+  "attempts": [
+    {"engine": "brave", "status": "ok", "count": 5, "reason": "", "elapsed": 0.88,
+     "http_status": 200, "retry_after": null, "transport": "impersonate"}
+  ],
+  "skipped": []
 }
 ```
 
@@ -123,7 +162,10 @@ headless-driver engines
 headless-driver engines --json
 ```
 
-Prints each engine, its endpoint host, and its position in the fallback chain.
+Prints each engine, its endpoint host, its position in the fallback chain,
+whether it needs a browser, whether it returns snippets, whether it honours
+`site:`, and which index (`provider`) it serves — DuckDuckGo and Yahoo are
+both Bing underneath. `--json` includes the aggregate-mode engine list.
 
 ### doctor
 
@@ -132,7 +174,9 @@ headless-driver doctor
 ```
 
 The quickest way to explain a failing run. It reports the installed versions,
-flags a Chrome/ChromeDriver mismatch, checks that each engine host is
+flags a Chrome/ChromeDriver mismatch, reports which transports are available —
+warning when only plain `requests` is, because its TLS fingerprint will not
+match the User-Agent — checks Playwright, checks that each engine host is
 reachable, and finally launches a browser to confirm the whole path works.
 
 ```
@@ -153,12 +197,63 @@ A version mismatch and an unreachable engine are warnings, not failures: a
 matching driver is fetched on demand, and the chain routes around dead engines.
 Only a genuinely broken setup exits non-zero.
 
+### bench
+
+```bash
+headless-driver bench                                   # 20 site: queries, 7 engines, 2 transports
+headless-driver bench --engines brave,yahoo --transports impersonate --limit 5
+headless-driver bench --min-ok-rate 0.5 --json > bench.json   # non-zero exit below 50%
+python -m headless.bench --queries-file my-queries.txt
+```
+
+Runs a fixed set of `site:` queries against each engine **on its own** (no
+fallback, circuit breaker off) for each transport, and prints a health matrix:
+
+```
+ engine        transport    ok  empty  blocked  unparsed  error  site-rows  p50 ms
+ brave         impersonate  18  1      1        0         0      121        640
+ duckduckgo    impersonate  15  2      3        0         0      98         710
+ duckduckgo    http         2   0      18       0         0      12         410
+```
+
+Accuracy claims only mean something measured from where the code will run. A
+laptop on a residential address gets answers from almost any engine; run this
+from the cloud (or on a schedule from CI — see `.github/workflows/engine-bench.yml`)
+to see what your servers see.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--engines` | `brave,duckduckgo,yahoo,mojeek,google_basic,duckduckgo_lite,bing` | Engines to measure |
+| `--transports` | `impersonate,http` | Transports to compare; unavailable ones are skipped |
+| `--queries-file PATH` | built-in 20 | One query per line, `#` for comments |
+| `--limit N` | all | Use only the first N queries |
+| `--pause` | `1.0` | Seconds between requests to one engine |
+| `--proxy`, `--region` | – | As for `search` |
+| `--min-ok-rate` | `0` | Exit 1 when any cell falls below this |
+| `--json` | off | Print JSON instead |
+
+### extract
+
+```bash
+headless-driver extract https://news.ycombinator.com --item tr.athing \
+    -f title=".titleline > a" -f link=".titleline > a@href" --json
+headless-driver extract https://example.com -f heading=h1 -f first_link=a@href
+```
+
+Renders the page with Playwright and applies a declarative schema: each
+`-f NAME=CSS` reads the text of the first match, `NAME=CSS@ATTR` reads an
+attribute (`href` and `src` are returned absolute). With `--item`, the schema
+is applied inside every matching element and a table (or JSON list) is printed.
+`--scroll N` scrolls to the bottom up to N times first, for pages that load more
+as you go. Needs the `playwright` extra.
+
 ### shot and pdf
 
 ```bash
 headless-driver shot https://example.com -o page.png --window 1280x720
 headless-driver pdf  https://example.com -o page.pdf
 headless-driver shot https://example.com --proxy socks5://127.0.0.1:9050
+headless-driver shot https://example.com --browser playwright --full-page
 ```
 
 | Option | Default | Meaning |
@@ -166,6 +261,9 @@ headless-driver shot https://example.com --proxy socks5://127.0.0.1:9050
 | `-o`, `--output` | `screenshot.png` / `page.pdf` | File to write |
 | `--window WxH` | `1920x1080` | Browser window size |
 | `--proxy` | – | Proxy server URL |
+| `--browser` | `selenium` | `selenium` or `playwright` |
+| `--full-page` | off | Capture the whole scrollable page (Playwright) |
+| `--show` | off | Show the browser window instead of running headless |
 | `--timeout` | `30.0` | Page load timeout in seconds |
 
 Missing parent directories are created for you.
@@ -194,8 +292,8 @@ Colour works on macOS, Linux and Windows, with no third-party dependency:
   but are not terminals, so they are detected by environment variable and get
   colour anyway. `NO_COLOR=1` still overrides that.
 
-Only the 16 basic ANSI colours are used, so output stays readable on low-colour
-terminals, and every symbol degrades to ASCII when the stream encoding cannot
+Only the 16 basic ANSI colours (and their bright variants) are used, so output
+stays readable on low-colour terminals, and every symbol degrades to ASCII when the stream encoding cannot
 represent it — a Windows code page or a non-UTF-8 POSIX locale prints `+`, `x`
 and `!` instead of `✓`, `✗` and `!`.
 
@@ -218,10 +316,16 @@ Everything below is importable straight from the package:
 ```python
 from headless import (
     Headless, ExtendedHeadless, MultiDriverManager,
-    AdvancedSearchScraper, SearchScraper,
+    AdvancedSearchScraper, SearchScraper, ScraperPool,
+    SearchResponse, EngineAttempt, AllEnginesBlocked,
+    EngineHealth, default_health, reset_default_health,
+    ImpersonateTransport, HttpTransport,
+    merge_results, normalize_url, normalize_text,
+    ColorFormatter, colorize_logging, enable_console_logging,
     find_chrome_binary, find_chromedriver_path, install_chromedriver,
-    ENGINE_SPECS, DEFAULT_ENGINE, DEFAULT_FALLBACK_ENGINES,
+    ENGINE_SPECS, DEFAULT_ENGINE, DEFAULT_FALLBACK_ENGINES, DEFAULT_AGGREGATE_ENGINES,
 )
+from headless.playwright_driver import PlaywrightBrowser, PlaywrightTransport
 ```
 
 ### Headless
@@ -388,7 +492,8 @@ with MultiDriverManager() as mgr:
 
 ### AdvancedSearchScraper
 
-Scrapes search results, walking a chain of engines until one answers.
+Scrapes search results, walking a chain of engines until one answers — or,
+with `mode="aggregate"`, asking several at once and ranking by agreement.
 
 ```python
 AdvancedSearchScraper(
@@ -396,12 +501,36 @@ AdvancedSearchScraper(
     max_results: int = 10,
     result_processor: Optional[Callable[[str, Dict], Dict]] = None,
     headless_options: Optional[dict] = None,
-    search_engine: str = "duckduckgo",
+    search_engine: str = "brave",
     verbose: bool = False,
     fallback: bool = True,
     fallback_engines: Optional[Sequence[str]] = None,
     page_load_timeout: float = 20.0,
     wait_timeout: float = 8.0,
+    proxy: Optional[str] = None,
+    transport: str = "auto",            # "auto" | "impersonate" | "http" | "browser"
+    keep_history: bool = False,
+    history_limit: int = 1000,
+    raise_on_block: bool = False,
+    user_agent: Optional[str] = None,
+    *,                                   # 1.1 options are keyword-only
+    mode: str = "first",                 # or "aggregate"
+    aggregate_engines: Optional[Sequence[str]] = None,
+    deadline: float = 8.0,
+    min_engines: int = 2,
+    strict_site: bool = True,
+    region: Optional[str] = None,        # e.g. "uk-en"
+    http_timeout: Optional[float] = None,  # default min(8, page_load_timeout)
+    circuit_breaker: bool = True,
+    health: Optional[EngineHealth] = None,
+    withdraw_browser_on_block: bool = True,
+    browser_cooldown: float = 120.0,
+    verify_empty: bool = False,
+    probe_query: str = "site:wikipedia.org python",
+    normalize: Optional[Callable[[str], str]] = None,
+    impersonate_profiles: Optional[Sequence[str]] = None,
+    browser: str = "selenium",           # or "playwright"
+    playwright_options: Optional[dict] = None,
 )
 ```
 
@@ -414,8 +543,23 @@ AdvancedSearchScraper(
 | `search_engine` | Engine to start with. An unknown name raises `ValueError`. |
 | `fallback` | Try the other engines when the first fails. |
 | `fallback_engines` | Custom fallback order; defaults to `DEFAULT_FALLBACK_ENGINES`. |
-| `page_load_timeout` | Seconds one engine may take to load before it is abandoned. |
+| `page_load_timeout` | Seconds a browser page may take to load before it is abandoned. |
 | `wait_timeout` | Seconds to wait for results to appear once the page has loaded. |
+| `proxy` | Proxy for every transport. Credentials in the URL work over `impersonate`, `http` and Playwright (not Selenium's Chrome switch). |
+| `transport` | How server-rendered engines are fetched; see [Transports](#transports-and-browserless-mode). |
+| `raise_on_block` | Raise `AllEnginesBlocked` instead of returning an empty, blocked (or cooling) response. |
+| `user_agent` | Override the User-Agent. Under impersonation this narrows the profiles to the same browser family. |
+| `mode` | Default search mode: `"first"` or `"aggregate"`. |
+| `aggregate_engines`, `deadline`, `min_engines` | Aggregate-mode defaults; see [Aggregate mode](#aggregate-mode). |
+| `strict_site` | For `site:` queries, skip fallback engines known to ignore `site:` (Bing) instead of fetching and discarding. |
+| `region` | `country-lang`, e.g. `uk-en`; sets Google `hl/lr/cr`, Brave's country cookie, Mojeek `arc/lb`, DuckDuckGo `l`. |
+| `http_timeout` | Timeout for browserless fetches, separate from the browser's. |
+| `circuit_breaker`, `health` | Per-engine stand-down after refusals; see [Circuit breaker](#circuit-breaker). |
+| `withdraw_browser_on_block`, `browser_cooldown` | Stop launching a browser for this long once two independent indexes refuse in one search. |
+| `verify_empty`, `probe_query` | Check an `empty` from a `site:`-honouring engine with a control query; see [Soft blocks](#soft-blocks). |
+| `normalize` | URL-normalisation hook used to merge results in aggregate mode. |
+| `impersonate_profiles` | Browser profiles to rotate between (default Chrome, Edge, Safari, Firefox, Chrome Android, Safari iOS). |
+| `browser`, `playwright_options` | Which browser serves JavaScript engines, and options for [PlaywrightBrowser](#playwright). |
 
 **Attributes**
 
@@ -430,26 +574,32 @@ AdvancedSearchScraper(
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `search(query, max_results=None, engine=None, fallback=None)` | `SearchResponse` | Walks the chain. `engine` chooses where to start; `fallback` decides whether the rest is tried. |
+| `search(query, max_results=None, engine=None, fallback=None, mode=None, engines=None, deadline=None, min_engines=None)` | `SearchResponse` | Walks the chain, or fans out with `mode="aggregate"`. `engine` chooses where to start; `fallback` decides whether the rest is tried. |
+| `probe(engine=None, query=None)` | `EngineAttempt` | Ask one engine a query that cannot be empty; `empty` means soft-blocked. |
+| `health()` | `Dict` | Circuit-breaker state per engine: `state`, `resume_in`, `last_status`, `http_status`. |
+| `reset_health(engine=None)` | `None` | Stand every engine (or one) back up now. |
+| `engines_honoring_site()` | `Set[str]` | Engines whose `empty` answer to a `site:` query is evidence of absence. |
+| `browserless_transport_name()` | `str` or `None` | `"impersonate"`, `"http"`, or `None`. |
 | `search_batch(queries, max_workers=4, per_query=None)` | `Dict[str, SearchResponse]` | Sequential unless the chain is HTTP-only; see [Parallel searching](#parallel-searching). |
 | `export(path, results=None)` | `bool` | Writes `results`, else the history, else the last response, to `.json` or `.csv`. |
 | `register_engine(name, spec)` | `None` | Adds or overrides an engine. Unspecified `js` defaults to True. |
-| `capabilities(engine=None)` | `Dict` | Whether the engine needs a browser and returns snippets. |
+| `capabilities(engine=None)` | `Dict` | `js`, `snippets`, `honors_site`, `provider`, `method`, `url`. |
 | `recycle()` | `None` | Discard the browser; the next search builds a fresh one. |
 | `default_result_processor(query, item)` | `Dict` | The identity processor used when `result_processor` is not supplied. |
-| `quit()` | `None` | Quits the driver if this object created it, and closes the HTTP session. |
+| `quit()` | `None` | Quits the driver if this object created it, and closes the HTTP, impersonation and Playwright sessions. |
 
 Each result is a dict:
 
 | Key | Meaning |
 | --- | --- |
-| `url` | Destination URL, with click-tracking redirects resolved |
-| `title` | Result heading |
-| `snippet` | Description text, `""` when the engine omits one |
+| `url` | Destination URL, with click-tracking redirects resolved and a percent-encoded path decoded where lossless |
+| `title` | Result heading, entity-unescaped, NFC-normalised, control and zero-width characters removed |
+| `snippet` | Description text, cleaned the same way; `""` when the engine omits one |
 | `favicon` | Favicon URL derived from the domain |
 | `cached` | Cached-page link when the engine offers one |
 | `quick_answer` | Reserved, currently `None` |
 | `engine` | Engine that produced this result — reliable per result, unlike a shared `last_engine` |
+| `votes`, `engines`, `ranks` | Aggregate mode only: how many engines returned it, which, and at what position |
 
 ```python
 from headless import AdvancedSearchScraper
@@ -463,11 +613,11 @@ with AdvancedSearchScraper(max_results=5) as scr:
 Choosing engines:
 
 ```python
-AdvancedSearchScraper(search_engine="bing")                # different start
-AdvancedSearchScraper(fallback=False)                      # no chain
-AdvancedSearchScraper(fallback_engines=["bing", "mojeek"]) # custom order
-scr.search("query", engine="bing")                         # start here, chain still applies
-scr.search("query", engine="bing", fallback=False)         # this engine only
+AdvancedSearchScraper(search_engine="yahoo")                # different start
+AdvancedSearchScraper(fallback=False)                       # no chain
+AdvancedSearchScraper(fallback_engines=["mojeek", "yahoo"]) # custom order
+scr.search("query", engine="yahoo")                         # start here, chain still applies
+scr.search("query", engine="yahoo", fallback=False)         # this engine only
 ```
 
 `engine` and `fallback` are independent. In 0.x, `search(engine=…)` silently
@@ -483,10 +633,9 @@ scr.export("results.csv")
 scr.quit()
 ```
 
-A WebDriver session is not thread-safe, so `search_batch` serialises access to
-the browser. Threads shorten the wait around a single driver rather than
-driving several at once; use `MultiDriverManager` with one scraper per driver
-for true parallelism.
+A WebDriver session is not thread-safe, so `search_batch` runs in parallel only
+when every engine in the chain can be fetched without a browser; otherwise it
+is sequential. Use `ScraperPool` for parallel browser work.
 
 Custom result shape:
 
@@ -498,8 +647,10 @@ def only_domain(query, item):
 scr = AdvancedSearchScraper(result_processor=only_domain)
 ```
 
-Adding your own engine — `spec` needs `url` (containing `{query}`), `result`,
-`link`, `title` and `snippet`; the selector lists are tried in order:
+Adding your own engine — `spec` needs `url`, `result`, `link`, `title` and
+`snippet`; the selector lists are tried in order. The URL either contains
+`{query}` or a `params` callable builds the query string (or POST form). See
+[Engine specs](#engine-specs) for every optional key:
 
 ```python
 scr = AdvancedSearchScraper()
@@ -612,16 +763,21 @@ with con.spinner("working"):
 | `write(text)`, `note(text)` | Plain and dimmed lines |
 | `rule(label)` | Full-width heading |
 | `status/ok/warn/fail(label, detail)` | Marked status lines |
-| `table(headers, rows, styles)` | Width-aware table, last column truncated to fit |
+| `table(headers, rows, styles)` | Width-aware table, last column truncated to fit; pre-coloured cells are measured by visible width |
 | `bar(good, bad, warn, width)` | Diffstat-style bar: green `+`, yellow `~`, red `-` |
 | `spinner(label)` | Context manager; inert off a terminal |
 | `is_terminal`, `width` | Stream properties |
 
-Style names: `bold`, `dim`, `italic`, `underline`, `red`, `green`, `yellow`,
-`blue`, `magenta`, `cyan`, `white`, `grey`.
+Style names: `bold`, `dim`, `italic`, `underline`, `black`, `red`, `green`,
+`yellow`, `blue`, `magenta`, `cyan`, `white`, `grey`, their `bright_` variants,
+and backgrounds `bg_red`, `bg_green`, `bg_yellow`, `bg_blue`, `bg_magenta`,
+`bg_cyan`, `bg_grey`.
 
 Module functions: `supports_color(stream)`, `supports_unicode(stream)`,
-`visible_width(text)` (ignores ANSI), `truncate(text, limit)`,
+`visible_width(text)` (ignores ANSI), `truncate(text, limit)` (ANSI-aware),
+`strip_ansi(text)`, `highlight(console, text, base)` (colours statuses, HTTP
+codes, URLs, quotes and numbers), `render_diag(message, level, console)`,
+`component_colour(name)`,
 `enable_windows_ansi()` (turns on the Windows console's ANSI mode and caches
 the result), the `LEVELS` table, and the stderr writers `diag(message, level)`,
 `debug`, `info`, `success`, `warn` and `error`.
@@ -674,14 +830,64 @@ elif not response:
 | Field | Meaning |
 | --- | --- |
 | `engine` | Which engine |
-| `status` | `ok`, `empty`, `blocked`, `timeout`, `unreachable`, `error` |
+| `status` | `ok`, `empty`, `blocked`, `rate_limited`, `unparsed`, `timeout`, `unreachable`, `error` |
 | `count` | Results extracted |
-| `reason` | Detail, e.g. `bot-check element '#challenge-form'` |
+| `reason` | Detail, e.g. `HTTP 403` or `bot-check element '#challenge-form'` |
 | `elapsed` | Seconds |
+| `http_status` | The HTTP status code, when the page came over HTTP or Playwright (Selenium cannot see it) |
+| `retry_after` | Seconds from a `Retry-After` header on a 429 |
+| `transport` | `impersonate`, `http`, `browser` or `playwright` |
 | `blocked` | True for every status except `ok` and `empty` |
+
+`str(attempt)` reads `mojeek: blocked (HTTP 403)`.
+
+How a page is classified, in order:
+
+1. **HTTP status first.** 429 is `rate_limited` (with `Retry-After`); 401, 403,
+   407 and 503 are `blocked`; DuckDuckGo's 202 anomaly page is `blocked`; any
+   other 4xx/5xx is `error`. A refusal is never reported as "no results",
+   whatever its body looks like.
+2. **Known bot checks** — challenge forms, CAPTCHA widgets, Google's
+   `enablejs` wall, `/sorry/` pages — are `blocked`. URL markers are matched
+   against the host and path only, so a search *for* "captcha" is not a captcha.
+3. **No result containers at all** — then the page's wording decides: a
+   CAPTCHA title or "unusual traffic" text is `blocked`; the engine's own
+   "no results" marker is `empty`; anything else is **`unparsed`** — a block
+   page with unknown markup, or a layout change. Neither is evidence of absence.
+4. Results found but all filtered out (ads, off-`site:` rows) is `empty`.
+
+| Status | Meaning | Evidence nothing exists? |
+| --- | --- | --- |
+| `ok` | Results extracted | – |
+| `empty` | The engine looked and found nothing | Yes, from an engine in `engines_honoring_site()` |
+| `blocked` | Refused: status code, bot check, soft block | No |
+| `rate_limited` | HTTP 429; see `retry_after` | No |
+| `unparsed` | A page we do not recognise | No |
+| `timeout`, `unreachable`, `error` | Network or local failure | No |
 
 `response.blocked` is True only when **every** attempt was a refusal. One engine
 that genuinely had nothing makes the search an honest empty result.
+
+### SearchResponse fields added in 1.1
+
+| Field | Meaning |
+| --- | --- |
+| `mode` | `"first"` or `"aggregate"` |
+| `engines` | Engines that contributed results |
+| `skipped` | Engines not asked: `{"engine", "reason", "resume_in"}` with reason `cooling`, `ignores_site`, `browser_withdrawn`, `duplicate_provider` or `needs_browser` |
+| `cooling` | True when nobody was asked because every eligible engine is standing down — "we chose not to ask", as opposed to `blocked`, "they refused us" |
+| `rate_limited`, `retry_after` | Whether any engine sent 429, and the longest wait any asked for |
+| `answered` | Attempts that were `ok` or `empty` |
+
+```python
+response = scraper.search(query)
+if response.cooling:
+    wait(min(s["resume_in"] for s in response.skipped))   # patience, not new evidence
+elif response.blocked:
+    back_off(response.retry_after or 60)                  # not the query's fault
+elif not response:
+    record_no_such_page()                                  # genuinely nothing to find
+```
 
 ### Strict mode
 
@@ -693,39 +899,251 @@ except AllEnginesBlocked as e:
     e.response.attempts      # what each engine did
 ```
 
-Only a blanket refusal raises; an ordinary empty result never does.
+A blanket refusal raises, and so does a search where every engine was cooling;
+an ordinary empty result never does.
 
 ---
 
 ## Transports and browserless mode
 
 Most engines render results on the server, so they need an HTTP client and an
-HTML parser rather than a browser. With the `http` extra installed, those
-engines are fetched directly:
+HTML parser rather than a browser.
 
-| | Browser | HTTP |
-| --- | --- | --- |
-| Typical search | seconds | sub-second |
-| Memory | ~1 GB per Chrome | a few MB |
-| Thread-safe | no | yes |
-| Needs Chrome installed | yes | no |
+| | Impersonate | HTTP | Browser (Selenium / Playwright) |
+| --- | --- | --- | --- |
+| Library | `curl_cffi` | `requests` | Chrome |
+| TLS / HTTP/2 fingerprint | A real browser's | Python's | A real browser's |
+| Typical search | ~1 s | sub-second, often refused | 1–9 s |
+| Memory | a few MB | a few MB | 300 MB – 1 GB |
+| Thread-safe | yes | yes | one session per thread |
+| Needs Chrome installed | no | no | yes |
 
 ```python
-AdvancedSearchScraper(transport="auto")     # default: HTTP where possible
-AdvancedSearchScraper(transport="http")     # never start a browser
-AdvancedSearchScraper(transport="browser")  # always use Chrome
+AdvancedSearchScraper(transport="auto")         # default: impersonate, else http, else browser
+AdvancedSearchScraper(transport="impersonate")  # browser fingerprint, never a browser
+AdvancedSearchScraper(transport="http")         # plain requests, never a browser
+AdvancedSearchScraper(transport="browser")      # always a browser
+AdvancedSearchScraper(browser="playwright")     # which browser serves JS engines
 ```
 
-`auto` uses HTTP for engines whose spec says `js: False` and the browser for the
-rest, so no Chrome is started at all unless the chain reaches an engine that
-needs one. `http` drops browser-only engines from the chain entirely — useful in
-a container with no Chrome in it.
+**Why impersonation.** Anti-bot front ends (Cloudflare, Akamai, Google's own)
+score the TLS ClientHello and HTTP/2 SETTINGS before they look at headers or
+IP reputation. `requests` presents Python's OpenSSL on HTTP/1.1 while its
+User-Agent claims to be Chrome — a mismatch detectable on sight, and acted on
+from datacentre ranges. `ImpersonateTransport` presents a complete,
+self-consistent browser: TLS, HTTP/2, header order and a matching User-Agent.
 
-```bash
-headless-driver search "python headless" --transport http
+- Each engine gets its own session per thread, with a randomly chosen profile
+  (`chrome`, `edge`, `safari`, `firefox`, `chrome_android`, `safari_ios`), so
+  cookies never cross engines and a fleet does not share one fingerprint.
+- After a refusal, that engine's session is rebuilt as a **different** browser.
+- The User-Agent is never overridden unless you pass `user_agent=`; then the
+  profiles are narrowed to the same browser family.
+- An engine can pin a profile — `google_basic` pins `chrome_android` to match
+  its mobile User-Agent.
+- Proxy credentials (`http://user:pass@host:port`) work.
+
+`transport="auto"` logs once, at INFO, which transport it chose, and suggests
+the `impersonate` extra when it had to fall back to plain `requests`.
+`headless-driver doctor` warns about the same thing.
+
+Browser-only engines are dropped from the chain under `impersonate` and
+`http`, which suits a container with no Chrome in it. Non-HTTP URLs
+(`file://`, `data:`) always go through the browser.
+
+A proxy set either way — `proxy=` or the older
+`headless_options={"additional_args": ["--proxy-server=..."]}` — applies to
+every transport, so switching transport never changes where your traffic comes
+from.
+
+Pages are parsed with `lxml` when it is installed (`[fast]` extra), otherwise
+Python's own `html.parser`.
+
+### Operators and ads
+
+Sponsored slots are excluded: DuckDuckGo's `y.js` links, Bing's, Yahoo's and
+Google's `aclick`/`aclk` endpoints and Brave's ad redirects are never returned
+as results.
+
+`site:` is enforced on the results, not merely passed to the engine. Bing
+honours `site:example.com` but ignores a path like `site:example.com/in` and
+answers with unrelated pages; such rows are dropped. With `strict_site=True`
+(the default), engines known to ignore `site:` are not even asked for a
+`site:` query unless you chose that engine explicitly.
+
+```python
+response = scraper.search('site:linkedin.com/in "Ada Lovelace"')
+# every URL is under linkedin.com/in, or the response is empty
+scraper.engines_honoring_site()   # {'brave', 'duckduckgo', 'yahoo', 'mojeek', ...}
 ```
 
-Non-HTTP URLs (`file://`, `data:`) always go through the browser.
+---
+
+## Aggregate mode
+
+```python
+response = scraper.search('site:linkedin.com/in "Jonnie Quinn" Credo Capital',
+                          mode="aggregate",
+                          engines=["brave", "duckduckgo", "yahoo", "mojeek", "google_basic"],
+                          deadline=8.0, min_engines=2)
+for hit in response:
+    print(hit["votes"], hit["engines"], hit["ranks"], hit["url"])
+```
+
+One query goes to several engines at once and results are ranked by how many
+agree. For identity search that is a strong signal: a profile returned by
+Brave *and* DuckDuckGo *and* Mojeek is much likelier to be right than one only
+Yahoo found.
+
+1. Engines that are cooling down, ignore `site:` (for `site:` queries) or need a
+   browser are left out and listed in `response.skipped`.
+2. **One engine per provider.** DuckDuckGo and Yahoo are both Bing underneath,
+   so asking both proves nothing: the first listed is asked, and its sibling
+   only if it refuses.
+3. Engines run in a thread pool; whatever has not answered by `deadline`
+   seconds is recorded as `timeout`.
+4. Results are merged by a normalised URL — host lower-cased, `www.`/`m.`
+   dropped, LinkedIn country subdomains folded (`uk.linkedin.com` →
+   `linkedin.com`), scheme, fragments, trailing slashes and tracking parameters
+   (`utm_*`, `gclid`, `trk`, …) ignored. Pass `normalize=` to change it.
+5. Each result keeps its best-ranked copy and the longest snippet any engine
+   offered, and gains `votes`, `engines` and `ranks`.
+6. Order: most votes, then best mean rank.
+7. **Early exit:** once `min_engines` have answered and the top three results
+   each have two or more votes, the rest are not waited for.
+
+`response.engine` is `"aggregate"` and `response.engines` lists the
+contributors. Aggregate mode needs a browserless transport. The same merge is
+available on its own:
+
+```python
+from headless import merge_results, normalize_url
+merge_results({"brave": [...], "mojeek": [...]}, engine_order=["brave", "mojeek"])
+```
+
+Two `site:`-honouring engines both answering `empty` is much stronger
+evidence of absence than one.
+
+---
+
+## Circuit breaker
+
+Once an engine refuses, asking it again straight away earns another refusal
+and teaches it that this address keeps coming back. `EngineHealth` stands an
+engine down:
+
+- after `failures_before_backoff` (3) consecutive refusals (`blocked` or
+  `rate_limited`), for `backoff_base` (15) seconds;
+- a 429 stands it down at once, for as long as `Retry-After` asks;
+- if it refuses again within one pause of resuming, the pause doubles, up to
+  `backoff_max` (120); a refusal after a quiet spell starts from the base again;
+- any real answer (`ok` or `empty`) resets it. Timeouts, unreachable hosts and
+  `unparsed` pages neither trip nor reset it — they are not the engine's decision.
+
+One instance is shared by every scraper in the process (`default_health()`),
+because the address being throttled is shared too; `ScraperPool` workers
+therefore stand down together.
+
+```python
+scraper.health()          # {"brave": {"state": "cooling", "resume_in": 12.0, "last_status": "rate_limited", ...}}
+scraper.reset_health()    # stand everything back up
+AdvancedSearchScraper(circuit_breaker=False)                    # opt out
+AdvancedSearchScraper(health=EngineHealth(backoff_base=30))     # your own policy
+```
+
+State changes are logged once each — a WARNING when an engine starts cooling,
+INFO when it answers again — rather than one line per blocked request.
+
+**Browser withdrawal.** When two *independent* indexes refuse in the same
+search, the address itself is probably throttled, and starting Chrome cannot
+get past that (on ECS it cost up to 120 s and about 1 GB per query). With
+`withdraw_browser_on_block=True` (the default) browser engines are then skipped
+for `browser_cooldown` seconds (`browser_withdrawn` in `response.skipped`).
+
+### Soft blocks
+
+DuckDuckGo throttles by serving an ordinary results page with no results,
+which looks exactly like a genuine absence. Two tools:
+
+```python
+scraper.probe("duckduckgo")          # EngineAttempt for a query that cannot be empty
+AdvancedSearchScraper(verify_empty=True)
+```
+
+With `verify_empty=True`, an `empty` from a `site:`-honouring engine triggers
+one control query on that engine (cached for 60 s). If the control query is
+empty too, the original attempt is rewritten to `blocked` with reason
+`soft block (control query empty)`.
+
+---
+
+## Playwright
+
+Playwright drives the browser over its devtools protocol, which sees the HTTP
+layer Selenium cannot. Install with `pip install "headless-driver[playwright]"`
+and `playwright install chromium`.
+
+**As the scraper's browser.** `AdvancedSearchScraper(browser="playwright")`
+serves JavaScript engines (and `transport="browser"`) through Playwright:
+
+- real **status codes and headers** from the browser, so a 429 with
+  `Retry-After` is classified exactly as over HTTP;
+- **resource blocking** — images, media and fonts are never downloaded;
+- **stealth** — `navigator.webdriver` hidden, plugins, languages,
+  `window.chrome` and WebGL vendor filled in, and the `HeadlessChrome`
+  User-Agent replaced by the one the same build sends with a window;
+- **one isolated context per engine**, rebuilt after a refusal;
+- **proxies with credentials**.
+
+**On its own**, `PlaywrightBrowser` is a scraping-oriented browser:
+
+```python
+from headless.playwright_driver import PlaywrightBrowser
+
+with PlaywrightBrowser(headless=True, block_resources=True, proxy="http://u:p@host:8080",
+                       locale="en-GB", timezone_id="Europe/London") as browser:
+    html, status = browser.fetch_html("https://example.com")
+    page = browser.fetch_page("https://example.com")        # a Page, with .status and .headers
+
+    rows = browser.extract("https://news.ycombinator.com",
+                           {"title": ".titleline > a", "link": ".titleline > a@href"},
+                           item_selector="tr.athing", scroll=0)
+
+    api = browser.capture_json("https://example.com/app", r"/api/",
+                               action=lambda page: page.click("text=Load more"))
+
+    browser.screenshot("https://example.com", "page.png", full_page=True)
+    browser.pdf("https://example.com", "page.pdf")
+```
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `browser` | `"chromium"` | `chromium`, `firefox` or `webkit` |
+| `headless` | `True` | Run without a window |
+| `proxy` | – | `scheme://user:pass@host:port` |
+| `user_agent`, `locale`, `timezone_id` | derived, `en-US`, – | Set together so they agree |
+| `viewport` | `(1366, 768)` | Window size |
+| `device` | – | A Playwright device name, e.g. `"iPhone 13"` |
+| `stealth` | `True` | Inject the stealth script and fix the headless User-Agent |
+| `block_resources` | `True` | `True` blocks images, media and fonts; or pass resource types |
+| `timeout` | `20.0` | Seconds for navigation and waits |
+| `trace_dir` | – | Record a Playwright trace per context, saved as `<key>.zip` on close |
+| `extra_headers`, `launch_args` | – | Passed through |
+
+| Method | Returns | Notes |
+| --- | --- | --- |
+| `fetch_html(url, key, wait_for)` | `(html, status)` | |
+| `fetch_page(url, key, wait_for)` | `Page` | Status, headers, parsed document |
+| `extract(url, schema, item_selector=None, key, scroll=0)` | `dict` or `list` | Schema values are `css` or `css@attr`; text is normalised |
+| `capture_json(url, pattern, key, wait=1.5, action=None)` | `list` | JSON bodies of responses whose URL matches |
+| `scroll_to_bottom(page, rounds=10)` | `int` | Stops when the page stops growing |
+| `screenshot(url, path, full_page=True)` | `bool` | Loads images for this even when blocking |
+| `pdf(url, path)` | `bool` | Chromium only |
+| `context(key)`, `rotate(key)` | – | Per-key isolated contexts; `rotate` discards cookies and storage |
+| `close()` | – | Also works as a context manager |
+
+Every method is safe to call from any thread: each thread gets its own
+Playwright driver, shared by every `PlaywrightBrowser` on that thread.
 
 ---
 
@@ -735,28 +1153,31 @@ One WebDriver session cannot be driven from several threads, so a single
 browser-backed scraper cannot search in parallel — `search_batch` runs
 sequentially and says so rather than pretending otherwise.
 
-Two ways to get real concurrency:
+Three ways to get real concurrency:
 
-**HTTP transport** — no session, no constraint:
+**A browserless transport** — no session, no constraint:
 
 ```python
-scraper = AdvancedSearchScraper(transport="http")
+scraper = AdvancedSearchScraper(transport="impersonate")
 responses = scraper.search_batch(queries, max_workers=8)
 ```
+
+**Aggregate mode** — one query, several engines at once (see
+[Aggregate mode](#aggregate-mode)).
 
 **`ScraperPool`** — one browser per worker, for engines that need one:
 
 ```python
 from headless import ScraperPool
 
-with ScraperPool(size=4, proxy="http://…", search_engine="duckduckgo_lite") as pool:
+with ScraperPool(size=4, proxy="http://…", search_engine="duckduckgo_js") as pool:
     for query, response in pool.map(queries):
         print(query, response.engine, len(response))
 ```
 
 `ScraperPool(size, **scraper_kwargs)` passes everything else through to
 `AdvancedSearchScraper`. A worker whose browser dies is recycled rather than
-failing every later query.
+failing every later query. Workers share one circuit breaker.
 
 | Method | Returns |
 | --- | --- |
@@ -769,68 +1190,92 @@ failing every later query.
 
 ## Search engines
 
-`duckduckgo` is the default because its endpoint renders server-side: there is
-no JavaScript to execute, so a search takes a fraction of the time the
-JavaScript front end needs.
+`brave` is the default: it answers from datacentre addresses, honours `site:`
+paths and returns snippets. Browserless engines come first, browser-only ones
+late, and Bing — which ignores `site:` paths — last.
 
-| # | Engine | Endpoint |
-| --- | --- | --- |
-| 1 | `duckduckgo` | `html.duckduckgo.com` |
-| 2 | `duckduckgo_lite` | `lite.duckduckgo.com` |
-| 3 | `bing` | `www.bing.com` |
-| 4 | `mojeek` | `www.mojeek.com` |
-| 5 | `duckduckgo_js` | `duckduckgo.com` |
-| 6 | `startpage` | `www.startpage.com` |
-| 7 | `google` | `www.google.com` |
-| 8 | `yandex` | `yandex.com` |
+| # | Engine | Endpoint | Needs | Honours `site:` | Index |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `brave` | `search.brave.com` | http | yes | brave |
+| 2 | `duckduckgo` | `html.duckduckgo.com` (POST form) | http | yes | bing |
+| 3 | `mojeek` | `www.mojeek.com` | http | yes | mojeek |
+| 4 | `yahoo` | `search.yahoo.com` (random path tokens) | http | yes | bing |
+| 5 | `google_basic` | `www.google.com` (Search-App client) | http | yes | google |
+| 6 | `duckduckgo_lite` | `lite.duckduckgo.com` | http | yes | bing |
+| 7 | `duckduckgo_js` | `duckduckgo.com` | browser | yes | bing |
+| 8 | `startpage` | `www.startpage.com` | browser | yes | google |
+| 9 | `google` | `www.google.com` | browser | yes | google |
+| 10 | `yandex` | `yandex.com` | browser | yes | yandex |
+| 11 | `bing` | `www.bing.com` | http | **no** | bing |
 
-An engine is abandoned and the next one tried when it serves a bot check,
-returns no results, exceeds `page_load_timeout`, or cannot be reached at all.
-The result is empty only after every engine has been tried — and
-`response.blocked` says whether that was a refusal or a genuine absence.
+Notes, verified against live endpoints on 2026-09-29:
+
+- **`duckduckgo`** now POSTs the HTML front end's own form (`q`, `b`, `l`),
+  as the page itself does. Its 202 anomaly page is a block.
+- **`yahoo`** needs fresh `_ylt`/`_ylu` path tokens per request; its
+  `/RU=…/RK=` redirects are unwrapped. Bing-backed, but unlike scraped Bing it
+  honours `site:` paths.
+- **`google_basic`** asks as an old Android Chrome webview carrying the Google
+  Search App token, with `CONSENT=YES+`, which Google serves a server-rendered
+  page instead of its JavaScript wall — from some addresses. When it does not,
+  the `enablejs` wall is detected as `blocked`. Keep the browser `google`
+  engine for callers who want it.
+- **`mojeek`** is now browserless. What looked like a "results-free stub" for
+  HTTP clients is a JavaScript captcha, and is detected as a block.
+- **`startpage`** fetches the home page's `sc` token before POSTing its form
+  when used over HTTP (set `js: False` on your instance to try it; it stays
+  browser-first by default).
+- **`duckduckgo_lite`** returns titles and URLs but **no snippets**.
+
+An engine is abandoned and the next one tried when it refuses, returns no
+results, exceeds its timeout, or cannot be reached at all. The result is empty
+only after every eligible engine has been tried — and `response.blocked` /
+`response.cooling` say whether that was a refusal or a genuine absence.
 
 ### Capabilities
 
-`ENGINE_SPECS` records what each engine can do, so callers do not have to
-discover it by observation:
+```python
+scraper.capabilities("yahoo")
+# {"js": False, "snippets": True, "honors_site": True, "provider": "bing",
+#  "method": "GET", "url": "https://search.yahoo.com/search"}
+```
+
+### Engine specs
+
+`ENGINE_SPECS` entries (and `register_engine()` specs) take:
 
 | Key | Meaning |
 | --- | --- |
-| `js` | Needs a browser; `False` engines can use the HTTP transport |
-| `snippets` | Returns description text at all |
-
-```python
-scraper.capabilities("duckduckgo_lite")
-# {"js": False, "snippets": False, "url": "https://lite.duckduckgo.com/lite/?q={query}"}
-```
-
-`duckduckgo_lite` returns titles and URLs but **no snippets**; build matching on
-titles for that engine. `mojeek` serves a results-free stub to non-browser
-clients, so it is marked `js: True` despite rendering server-side.
+| `url` | Endpoint. May contain `{query}` (legacy templates still work) |
+| `method` | `"GET"` (default) or `"POST"` |
+| `params` | `callable(query, region) -> dict`: the query string for GET, the form for POST |
+| `headers`, `cookies` | A dict, or `callable(region) -> dict`, sent with each request |
+| `url_builder` | `callable() -> url`, for per-request URL parts (Yahoo's tokens) |
+| `prepare` | `callable(ctx)` pre-flight hook; `ctx` has `request`, `fetch`, `spec`, `query`, `region` |
+| `impersonate` | Pin a TLS profile, e.g. `"chrome_android"` |
+| `result`, `link`, `title`, `snippet` | CSS selectors; lists are tried in order |
+| `unwrap` | `callable(href) -> href`, a redirect decoder |
+| `no_results` | Selectors, or `"text:..."` substrings, marking a genuine "no results" page. With it, an unrecognised page is `unparsed`; without it, `empty` as before |
+| `block_statuses` | Extra HTTP statuses that mean "refused" (DuckDuckGo's 202) |
+| `js` | Needs a browser. Defaults to `True` for registered engines |
+| `snippets` | Returns description text |
+| `honors_site` | Respects `site:` paths. Registered engines default to `None`: neither trusted for absence nor skipped |
+| `provider` | Whose index it is, for aggregate de-duplication |
 
 Verify the engines still parse — selectors are someone else's markup and rot
 without warning:
 
 ```bash
 headless-driver doctor --engines
-headless-driver doctor --engines --transport http --query wikipedia
+headless-driver doctor --engines --transport impersonate --query wikipedia
+headless-driver bench --min-ok-rate 0.5
 ```
 
-It runs a probe query through every engine and reports status, result count,
-title and snippet coverage, and timing. Worth running on a schedule in CI: it
-turns "silently degraded for six weeks" into a red build the next morning.
-
-Search engines defend aggressively against automation, and Google in particular
-serves a CAPTCHA to headless browsers on most networks — which is exactly why
-the chain exists. Blocks are reported when `verbose=True`.
-
-Click-tracking redirects are resolved to real destinations for DuckDuckGo
-(`/l/?uddg=`), Bing (`/ck/a`) and Google (`/url?q=`).
-
-The constants are importable:
+Click-tracking redirects are resolved for DuckDuckGo (`/l/?uddg=`), Bing
+(`/ck/a`), Google (`/url?q=`) and Yahoo (`/RU=`).
 
 ```python
-from headless import ENGINE_SPECS, DEFAULT_ENGINE, DEFAULT_FALLBACK_ENGINES
+from headless import ENGINE_SPECS, DEFAULT_ENGINE, DEFAULT_FALLBACK_ENGINES, DEFAULT_AGGREGATE_ENGINES
 ```
 
 ---
@@ -843,8 +1288,10 @@ page looks like a hang. Every layer here sets a bound well below it.
 | Setting | Default | Bounds |
 | --- | --- | --- |
 | `Headless(page_load_timeout=…)` | `30.0` | Any page load on that driver |
-| `AdvancedSearchScraper(page_load_timeout=…)` | `20.0` | One engine's page load |
+| `AdvancedSearchScraper(page_load_timeout=…)` | `20.0` | One engine's browser page load |
+| `AdvancedSearchScraper(http_timeout=…)` | `min(8, page_load_timeout)` | One browserless fetch |
 | `AdvancedSearchScraper(wait_timeout=…)` | `8.0` | Waiting for results to render |
+| `AdvancedSearchScraper(deadline=…)` | `8.0` | A whole aggregate search |
 | `SearchScraper(page_load_timeout=…, wait_timeout=…)` | `20.0`, `8.0` | As above |
 
 Pass `page_load_timeout=None` to `Headless` to restore Selenium's default.
@@ -870,30 +1317,53 @@ logging.getLogger("headless").setLevel(logging.INFO)      # route into your own 
 logging.getLogger("headless.scraper")                     # per-component children
 ```
 
-Child loggers are `headless.core`, `headless.manager`, `headless.scraper` and
-`headless.transport`. To get the coloured console output instead:
+Child loggers are `headless.core`, `headless.manager`, `headless.scraper`,
+`headless.transport`, `headless.health`, `headless.playwright` and
+`headless.bench`.
+
+### Colour
+
+Console output is coloured by level with a badge, the component tag gets a
+stable colour of its own, and the message highlights what matters: HTTP status
+codes, statuses (`blocked` and `rate_limited` in red, `cooling down` and
+`timeout` in yellow, `ok` in green), URLs, quoted queries and numbers.
+
+```
+! WARN  [health] brave cooling down for 15s (HTTP 429)
+ℹ INFO  [transport] using the impersonate transport
+✗ ERROR [scraper] every engine refused 'site:linkedin.com/in x' (brave:rate_limited, duckduckgo:blocked)
+· DEBUG [scraper] 10 results from brave
+```
+
+Three ways to turn it on:
 
 ```python
-from headless import enable_console_logging, disable_console_logging, get_logger
+from headless import enable_console_logging, colorize_logging, ColorFormatter
 
-enable_console_logging()               # DEBUG to stderr, coloured
-enable_console_logging(logging.WARNING)
-disable_console_logging()
-get_logger("scraper")                  # the same child logger
+enable_console_logging()                     # DEBUG to stderr, coloured
+enable_console_logging(logging.WARNING, timestamps=True,
+                       third_party=True,     # webdriver-manager, selenium, urllib3, curl_cffi too
+                       capture_warnings=True)  # Python warnings, in the same style
+
+logging.basicConfig(level=logging.INFO)
+colorize_logging()                           # colour the app's own console handlers (terminals only)
+
+handler = logging.StreamHandler()
+handler.setFormatter(ColorFormatter())       # or wire the formatter in yourself
 ```
 
-`verbose=True` on any class calls `enable_console_logging()` for you — the
-caller explicitly asking for output is the one case where a library may write to
-the console uninvited. Diagnostics are
-coloured by severity, and a leading `[Component]` tag is highlighted separately
-so the message itself stands out:
+Or from the environment, with no code change:
 
+```bash
+HEADLESS_DRIVER_LOG=info python my_app.py    # debug | info | warning | error | off
 ```
-[Headless] Building Chrome options...              grey, no marker
-✓ [Headless] WebDriver started successfully        green
-! [Headless] ChromeDriver is incompatible …        yellow
-✗ [Headless] Failed to start Chrome WebDriver      red
-```
+
+`verbose=True` on any class calls `enable_console_logging()` for you. The CLI
+also renders third-party loggers and Python warnings, so nothing arrives as a
+plain line between coloured ones. `colorize_logging()` only touches handlers
+writing to a terminal (or with `FORCE_COLOR` set), so log files stay plain.
+`NO_COLOR`, `FORCE_COLOR` and the other rules under
+[Colour, piping and exit codes](#colour-piping-and-exit-codes) apply.
 
 Emit your own with the same formatting:
 
@@ -902,18 +1372,16 @@ from headless.ui import diag, debug, info, success, warn, error
 
 warn("[MyBot] retrying in 5s")
 error("[MyBot] giving up")
-diag("[MyBot] custom", level="success")   # or call diag directly
+diag("[MyBot] custom", level="success")
 ```
 
-| Level | Colour | Marker | Use |
+| Level | Badge | Body | Marker |
 | --- | --- | --- | --- |
-| `debug` | grey | – | Tracing behind `verbose=True` |
-| `info` | grey | – | Ordinary progress |
-| `success` | green | `✓` | Something completed |
-| `warn` | yellow | `!` | Recoverable problem |
-| `error` | red | `✗` | Failure |
-
-All of them write to stderr and respect the colour rules above.
+| `debug` | magenta | grey | `·` |
+| `info` | bright blue | default, highlighted | `ℹ` |
+| `success` | black on green | green | `✓` |
+| `warn` | black on yellow | yellow | `!` |
+| `error` | white on red | red | `✗` |
 
 ---
 
@@ -922,40 +1390,54 @@ All of them write to stderr and respect the colour rules above.
 From the repository root:
 
 ```bash
-python -m unittest discover -s tests          # everything, 84 tests
+pip install -e ".[dev,fast]" && playwright install chromium
+python -m unittest discover -s tests          # everything: unit, fixtures, e2e (360+ tests)
+python -m unittest tests.test_v11             # 1.1 features, offline, fast
 python -m unittest tests.test_cli             # CLI and UI, offline, instant
-python -m unittest tests.test_headless        # driver and scraping
-python -m unittest discover -s tests -v       # name every test
+python -m unittest discover -s tests/e2e      # the end-to-end suite alone
+coverage run -m unittest discover -s tests && coverage report   # ~90%
 ```
+
+`SKIP_LIVE_TESTS=1` skips the few tests that hit real engines. Everything else
+is hermetic:
+
+- **Dated fixtures** in `tests/fixtures/<engine>_<case>_<YYYYMMDD>.html` are
+  live pages captured from each engine — results, "no results", 403, 429,
+  captcha and JavaScript-wall pages — so the date of the markup is visible.
+- **The end-to-end suite** (`tests/e2e/`) serves a local site whose pages
+  reproduce every engine's real markup, generated from `data.json` by
+  `build_site.py`. The server behaves like the engines where it matters
+  (DuckDuckGo's POST form, Yahoo's path tokens, Google's Search-App check,
+  Startpage's `sc` token) and misbehaves on demand (`zzzblock`, `zzzslow`,
+  `zzzcaptcha`, …). The scraper must return exactly the ground truth through
+  every transport, Selenium and Playwright. `python tests/e2e/server.py` serves
+  it for browsing.
+- **From the installed wheel:** `scripts/e2e.sh` builds the wheel, installs it
+  into a fresh virtualenv and runs the end-to-end suite from outside the source
+  tree (`E2E_REQUIRE_INSTALLED=1` asserts the import came from
+  `site-packages`). CI does this on Linux, macOS and Windows.
 
 A single class or test:
 
 ```bash
 python -m unittest tests.test_headless.TestFallbackChain
-python -m unittest tests.test_cli.TestConsole.test_bar_shows_every_non_zero_segment
+python -m unittest tests.test_v11.TestAggregate.test_results_are_ranked_by_agreement
 ```
 
-`pytest` works unchanged if you prefer it:
-
-```bash
-pytest tests -q
-pytest tests/test_cli.py -k bar -v
-```
-
-The fallback tests drive local HTML fixtures over `file://`, so they need no
-network. Browser and live-search tests skip themselves when Chrome or the
-network is unavailable.
+`pytest` works unchanged if you prefer it.
 
 ---
 
 ## Deployment
 
 Getting Chrome and a matching driver into a container is most of the work of
-deploying this. The [Dockerfile](Dockerfile) in the repository does it:
+deploying browser automation. The [Dockerfile](Dockerfile) in the repository
+does it, with the `impersonate`, `http` and `fast` extras:
 
 ```bash
 docker build -t headless-driver .
 docker run --rm --shm-size=1g headless-driver search "python headless"
+docker run --rm headless-driver search 'site:linkedin.com/in "jane doe"' --mode aggregate
 ```
 
 It pins Chrome and a matching chromedriver and bakes both in, so nothing is
@@ -963,19 +1445,22 @@ downloaded at runtime; runs as a non-root user with a writable `HOME`; and uses
 `tini` to reap the processes Chrome leaves behind.
 
 `--shm-size` matters: Chrome's default `/dev/shm` in Docker is 64 MB and it
-crashes on real pages without more. `--disable-dev-shm-usage` is already set,
-which covers most cases, but a larger shm is the more reliable fix.
+crashes on real pages without more.
 
-**Or skip Chrome entirely.** With `transport="http"` there is no browser to
-install, and the image is a plain `python:slim` with two pip packages:
+**Or skip Chrome entirely.** Search needs no browser:
 
 ```dockerfile
 FROM python:3.12-slim
-RUN pip install --no-cache-dir "headless-driver[http]"
+RUN pip install --no-cache-dir "headless-driver[impersonate]"
 ```
 
-That covers every engine marked `js: False`. See
-[Transports](#transports-and-browserless-mode).
+That covers every engine marked `js: False` — the whole default chain up to
+`duckduckgo_js`, and all of aggregate mode.
+
+**Measure from where you deploy.** Run `headless-driver bench` once from the
+target environment (an ECS task, a Lambda, a CI runner); a laptop cannot show
+what a datacentre address sees. `.github/workflows/engine-bench.yml` runs it
+weekly from GitHub's Azure runners.
 
 ---
 
@@ -985,13 +1470,15 @@ That covers every engine marked `js: False`. See
 
 | Symptom | Cause and fix |
 | --- | --- |
-| Searches return `[]` from a datacentre but work locally | Engines CAPTCHA cloud address ranges. Check `response.blocked` rather than treating it as "not found"; use a proxy, or a residential egress. |
+| Searches return `[]` from a datacentre but work locally | Engines refuse cloud address ranges. Install `headless-driver[impersonate]` (doctor warns when it is missing), check `response.blocked`/`response.rate_limited` rather than treating it as "not found", try `mode="aggregate"`, and use a proxy or residential egress if every engine refuses. |
+| `response` is empty and `response.cooling` is True | Every eligible engine is standing down after refusals. Wait `resume_in` seconds, or `scraper.reset_health()` if you know the block has lifted. |
+| An engine reports `unparsed` | Its page had no result containers and no "no results" marker: an unknown block page or a layout change. Run `headless-driver doctor --engines`; if it persists, the selectors need updating. |
+| `empty` from DuckDuckGo that seems wrong | A soft block. Use `verify_empty=True`, or check with `scraper.probe("duckduckgo")`. |
 | A long-running worker grows in memory | `keep_history=True` retains every result. Leave it off (the default), or lower `history_limit`. |
-| --- | --- |
-| `SessionNotCreatedException`, "only supports Chrome version N" | The chromedriver on `PATH` is stale. A matching one is downloaded automatically; `brew upgrade chromedriver` or `apt install --only-upgrade chromium-driver` silences the warning. |
-| Search returns `[]` | Every engine was blocked or unreachable. Run with `verbose=True` to see which, and check `doctor`'s connectivity section. |
-| Searches feel slow | Lower `page_load_timeout` and `wait_timeout`, or pin a fast engine with `fallback=False`. Blocked engines are what cost time, since each is attempted in turn. |
-| Screenshot or PDF is blank | Navigate before capturing: `driver.get(url)` then `hl.screenshot(path)`. |
-| Chrome fails to start on a server or in Docker | Already handled by `--no-sandbox` and `--disable-dev-shm-usage`. Make sure a browser is installed: `apt install -y chromium chromium-driver`. |
-| `--json` output will not parse | Fixed in current versions, where diagnostics go to stderr. Add `2>/dev/null` if an older version is installed. |
-| Detected as a bot | Try `ExtendedHeadless(stealth=True)`, a real `user_agent`, and a `proxy`. No approach is reliable against every engine. |
+| `SessionNotCreatedException`, "only supports Chrome version N" | The chromedriver on `PATH` is stale. A matching one is downloaded automatically. |
+| Playwright: "Executable doesn't exist" | Run `playwright install chromium`. The attempt is reported as `error` with that hint. |
+| Searches feel slow | Install `[impersonate]` so no browser is started; lower `http_timeout`; use `mode="aggregate"` with a `deadline`. Browser engines are what cost time. |
+| Screenshot or PDF is blank | Navigate before capturing: `driver.get(url)` then `hl.screenshot(path)`; or use `PlaywrightBrowser.screenshot(url, path)`. |
+| Chrome fails to start on a server or in Docker | Already handled by `--no-sandbox` and `--disable-dev-shm-usage`. Make sure a browser is installed. |
+| Detected as a bot | Prefer `transport="impersonate"`, or `browser="playwright"` (stealth on by default). With Selenium, `ExtendedHeadless(stealth=True)`. Add a `proxy`. No approach is reliable against every engine. |
+| Plain, uncoloured log lines from your own logging setup | Call `headless.colorize_logging()` after `logging.basicConfig()`, or use `ColorFormatter`. |

@@ -4,9 +4,12 @@
 
 # headless-driver
 
-**Headless Chrome automation and a multi-engine search scraper for Python.**<br/>
-Proxy and stealth support, automatic driver installation, screenshots and PDF export,
-multi-driver management, and a colourful CLI.
+### The fast multi-engine search scraper for Python
+
+**Search results from Brave, DuckDuckGo, Yahoo, Mojeek, Google and Bing in about a second — no browser, no API key.**<br/>
+Real browser TLS fingerprints, consensus ranking across engines, honest block detection and
+per-engine circuit breakers. Plus Selenium **and Playwright** automation, screenshots, PDF,
+structured extraction and a colourful CLI.
 
 <a href="https://pypi.org/project/headless-driver/"><img alt="PyPI version" src="https://img.shields.io/pypi/v/headless-driver?style=flat-square&logo=pypi&logoColor=white&color=3775A9" /></a>
 <a href="https://pypi.org/project/headless-driver/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/headless-driver?style=flat-square&logo=python&logoColor=white" /></a>
@@ -15,7 +18,9 @@ multi-driver management, and a colourful CLI.
 <a href="LICENSE"><img alt="License" src="https://img.shields.io/pypi/l/headless-driver?style=flat-square&color=yellow" /></a>
 
 <a href="https://github.com/nuhmanpk/headless-driver/actions/workflows/tests.yml"><img alt="Tests" src="https://img.shields.io/github/actions/workflow/status/nuhmanpk/headless-driver/tests.yml?style=flat-square&logo=githubactions&logoColor=white&label=tests" /></a>
+<a href="https://codecov.io/gh/nuhmanpk/headless-driver"><img alt="Coverage" src="https://img.shields.io/codecov/c/github/nuhmanpk/headless-driver?style=flat-square&logo=codecov&logoColor=white" /></a>
 <img alt="Selenium" src="https://img.shields.io/badge/selenium-4.35-43B02A?style=flat-square&logo=selenium&logoColor=white" />
+<img alt="Playwright" src="https://img.shields.io/badge/playwright-supported-2EAD33?style=flat-square&logo=playwright&logoColor=white" />
 <img alt="Chrome headless" src="https://img.shields.io/badge/chrome-headless-4285F4?style=flat-square&logo=googlechrome&logoColor=white" />
 <img alt="Platforms" src="https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-lightgrey?style=flat-square" />
 
@@ -30,38 +35,79 @@ multi-driver management, and a colourful CLI.
 
 <br/>
 
-[**Documentation**](DOCS.md) · [Quick start](#quick-start) · [CLI](#command-line) · [Engines](#search-engines) · [PyPI](https://pypi.org/project/headless-driver/) · [Issues](https://github.com/nuhmanpk/headless-driver/issues)
+[**Documentation**](DOCS.md) · [Quick start](#quick-start) · [Performance](#performance) · [CLI](#command-line) · [Engines](#search-engines) · [Roadmap](TODO.md) · [PyPI](https://pypi.org/project/headless-driver/)
 
 </div>
 
 ---
 
-## Features
+## Why headless-driver
 
-- Headless and windowed Chrome management, with temporary or persistent profiles
-- HTTP and SOCKS proxy support, plus optional stealth mode
-- Automatic ChromeDriver installation, and recovery when the installed driver does not match your Chrome
-- Screenshot and PDF export via Chrome DevTools
-- Download folder management
-- Multi-driver manager for many isolated browser instances
-- Search scraping across 8 engines, starting with DuckDuckGo's no-JavaScript endpoint and falling back automatically when one blocks you
-- **Tells you when you were blocked** — "nobody has an answer" and "everybody refused me" are different results, not both an empty list
-- **Browserless mode** — server-rendered engines fetched over HTTP: sub-second instead of seconds, megabytes instead of a gigabyte, and thread-safe
-- `ScraperPool` for genuinely parallel searching, one browser per worker
-- Standard `logging` throughout: silent until your application asks
-- Bounded page-load timeouts, so a stalled engine fails over instead of hanging
-- A `headless-driver` CLI with coloured output, `--json` for piping, and a `doctor` command that diagnoses your setup
-- Colour everywhere it makes sense — macOS, Linux, Windows consoles and CI log viewers — with no extra dependency, degrading to plain ASCII when it does not
+- **Fast** — engines are fetched over HTTP with a real browser's TLS and HTTP/2
+  fingerprint (`curl_cffi`), not by driving Chrome: about a second per query
+  instead of six to nine, megabytes instead of a gigabyte, and thread-safe.
+- **Gets answers where others get CAPTCHAs** — from cloud and datacentre
+  addresses (AWS, ECS, GitHub Actions) a Python TLS stack claiming to be Chrome
+  is refused on sight. headless-driver presents a consistent browser, rotates
+  between Chrome, Edge, Safari and Firefox profiles after a refusal, and asks
+  each engine the way its own front end does.
+- **Accurate** — `mode="aggregate"` asks one engine per independent index at
+  once and ranks results by how many agree. A LinkedIn profile returned by
+  Brave, DuckDuckGo *and* Mojeek is far likelier to be the right person.
+- **Honest** — "nobody has an answer" (`empty`) and "they refused me"
+  (`blocked`, `rate_limited` with `Retry-After`, `unparsed`) are different
+  results. HTTP 403/429/503 are never reported as "no results", so you never
+  store a false negative.
+- **Polite by design** — a per-engine circuit breaker stands an engine down
+  after refusals and escalates the pause; Chrome is not launched when the
+  address itself is throttled.
+- **Browser automation when you need it** — Selenium or Playwright, stealth,
+  proxies (with credentials under Playwright), screenshots, PDF, declarative
+  `extract()` and JSON-API capture.
+
+### Features
+
+- 11 engines: **Brave**, **DuckDuckGo** (HTML POST form, Lite, JS), **Yahoo**,
+  **Mojeek**, **Google** (basic Search-App endpoint and browser), **Startpage**,
+  **Yandex**, **Bing**
+- Three browserless transports — `impersonate` (default when installed),
+  plain `http`, or a browser — plus Selenium or Playwright for JavaScript engines
+- Two search modes — `first` (walk a fallback chain) and `aggregate`
+  (parallel fan-out, provider de-duplication, consensus `votes`, deadline)
+- `site:` is enforced: engines that ignore it are skipped, off-target rows dropped
+- Structured `SearchResponse`: per-engine `attempts` with status, HTTP code,
+  `Retry-After`, transport and timing; `blocked`, `cooling`, `skipped`
+- Per-engine `EngineHealth` circuit breaker shared across a process, soft-block
+  detection (`verify_empty`, `probe()`), regional results (`region="uk-en"`)
+- Clean text: HTML entities, Unicode normalisation, zero-width characters, and
+  click-tracking redirects (DuckDuckGo, Google, Bing, Yahoo) all unwrapped; ads dropped
+- `ScraperPool`, `search_batch`, JSON/CSV export
+- `headless-driver` CLI: `search`, `engines`, `doctor`, `bench`, `extract`,
+  `shot`, `pdf` — coloured everywhere, `--json` for piping
+- Coloured, levelled logs — for this package and, on request, for your own
+  logging setup (`colorize_logging()`, `ColorFormatter`)
+- Tested: 360+ unit tests, ~90% coverage, and an end-to-end suite that scrapes a
+  local site with the installed wheel on Linux, macOS and Windows
 
 ## Install
 
 ```bash
-pip install headless-driver              # browser only
-pip install "headless-driver[http]"      # recommended: adds browserless mode
+pip install "headless-driver[impersonate]"   # recommended: fast browserless search
+pip install "headless-driver[playwright]"    # Playwright backend (then: playwright install chromium)
+pip install "headless-driver[all]"           # everything
+pip install headless-driver                  # Selenium only
 ```
 
-Needs Python 3.9+ and an installed Chrome or Chromium. A matching ChromeDriver
-is downloaded automatically when required.
+| Extra | Adds | Use it for |
+| --- | --- | --- |
+| `impersonate` | `curl_cffi`, `beautifulsoup4` | Browser TLS fingerprint; what `transport="auto"` prefers. The one to use from the cloud. |
+| `http` | `requests`, `beautifulsoup4` | Plain browserless fallback |
+| `playwright` | `playwright` | `browser="playwright"`, `extract()`, `capture_json()` |
+| `fast` | `lxml` | Faster parsing at volume, used automatically |
+
+Needs Python 3.9+. Search needs no browser at all; browser automation needs an
+installed Chrome or Chromium (a matching ChromeDriver is downloaded
+automatically), or Playwright's own build via `playwright install chromium`.
 
 On Debian/Ubuntu you can install a system browser and driver with:
 
@@ -79,7 +125,7 @@ with Headless() as driver:
     print(driver.title)
 ```
 
-Search the web — no browser needed for most engines:
+Search the web — no browser needed:
 
 ```python
 from headless import AdvancedSearchScraper
@@ -92,12 +138,24 @@ with AdvancedSearchScraper(max_results=5) as scraper:
 
     print("answered by", response.engine)
     if response.blocked:                  # every engine refused, not "no results"
-        print("blocked:", [a.reason for a in response.refused])
+        print("blocked:", [str(a) for a in response.refused])
+```
+
+Ask several engines at once and rank by agreement:
+
+```python
+with AdvancedSearchScraper(region="uk-en") as scraper:
+    response = scraper.search('site:linkedin.com/in "Jane Doe" Credo Capital',
+                              mode="aggregate", deadline=8)
+    for hit in response:
+        print(hit["votes"], hit["engines"], hit["url"])
+    # 3 ['brave', 'duckduckgo', 'mojeek'] https://www.linkedin.com/in/jane-doe
 ```
 
 Being told you were blocked is the difference between backing off and recording
 a false negative. Engines CAPTCHA cloud address ranges, so the same code that
-works on a laptop returns nothing from ECS — `response.blocked` says which
+works on a laptop can get nothing from ECS — `response.blocked`,
+`response.rate_limited`, `response.retry_after` and `response.cooling` say which
 happened.
 
 Search in parallel:
@@ -110,7 +168,20 @@ with ScraperPool(size=4) as pool:
         print(query, response.engine, len(response))
 ```
 
-Screenshot and PDF:
+Playwright, with structured extraction:
+
+```python
+from headless.playwright_driver import PlaywrightBrowser
+
+with PlaywrightBrowser(block_resources=True) as browser:
+    rows = browser.extract("https://news.ycombinator.com",
+                           {"title": ".titleline > a", "link": ".titleline > a@href"},
+                           item_selector="tr.athing")
+    api = browser.capture_json("https://example.com/app", r"/api/")   # read the site's own JSON
+    browser.screenshot("https://example.com", "page.png", full_page=True)
+```
+
+Screenshot and PDF with Selenium:
 
 ```python
 from headless import ExtendedHeadless
@@ -124,17 +195,37 @@ hl.save_pdf("example.pdf")
 hl.quit()
 ```
 
+## Performance
+
+Measured 2026-09-29 from a laptop, three queries against Yahoo, then a
+five-engine aggregate search. Your numbers will differ; the ratios are the point.
+
+| How | Time per query | Answered | Memory |
+| --- | --- | --- | --- |
+| `transport="impersonate"` (default with the extra) | **~1.1 s** | 2/3 | a few MB |
+| `transport="http"` (plain `requests`) | 0.2 s | **0/3** — refused | a few MB |
+| Playwright (`browser="playwright"`) | 1.2 s warm, 2.9 s cold | 3/3 | ~300 MB |
+| Selenium Chrome (`transport="browser"`) | 6–9 s | 1/3 | ~1 GB |
+| `mode="aggregate"`, 5 engines in parallel | **1.07 s** total | 2 engines agreed on all 10 results | a few MB |
+
+The plain-`requests` row is why impersonation is the default: a Python TLS
+handshake behind a Chrome User-Agent is refused on sight. Measure it from your
+own servers with `headless-driver bench`.
+
 ## Command line
 
 ```bash
 headless-driver search "python headless browser" -n 5
+headless-driver search 'site:linkedin.com/in "jane doe"' --mode aggregate --region uk-en
 headless-driver search "selenium stealth" --json | jq -r '.results[].url'
-headless-driver search "python" --transport http   # no browser at all
+headless-driver search "python" --transport impersonate   # no browser at all
 headless-driver engines                    # engines, capabilities, fallback order
-headless-driver doctor                     # check chrome, driver, connectivity
+headless-driver doctor                     # check chrome, driver, transports, connectivity
 headless-driver doctor --engines           # check the engines still parse
+headless-driver bench --min-ok-rate 0.5    # which engines answer from this address
+headless-driver extract https://example.com -f title=h1 -f link=a@href --json
 headless-driver shot https://example.com -o page.png --window 1280x720
-headless-driver pdf  https://example.com -o page.pdf
+headless-driver pdf  https://example.com -o page.pdf --browser playwright
 ```
 
 `doctor` is the quickest way to explain a failing run:
@@ -163,43 +254,48 @@ See [DOCS.md](DOCS.md#command-line) for every command and flag.
 
 ## Search engines
 
-Searching starts at DuckDuckGo's no-JavaScript endpoint, which returns
-server-rendered HTML and so is much faster than the JavaScript front end. If an
-engine serves a bot check, returns nothing, or stalls, the next one is tried:
+Searching starts at Brave, which answers from datacentre addresses and honours
+`site:` paths. If an engine refuses, has nothing, or stalls, the next is tried —
+browserless engines first, browser-only ones late, and Bing, which ignores
+`site:` paths, last:
 
 ```
-duckduckgo → duckduckgo_lite → bing → mojeek
-           → duckduckgo_js → startpage → google → yandex
+brave → duckduckgo → mojeek → yahoo → google_basic → duckduckgo_lite
+      → duckduckgo_js → startpage → google → yandex → bing
 ```
-
-`search()` returns `[]` only once every engine has been tried.
 
 ```python
-AdvancedSearchScraper(search_engine="bing")                # start elsewhere
-AdvancedSearchScraper(fallback=False)                      # single engine
-AdvancedSearchScraper(fallback_engines=["bing", "mojeek"])  # custom order
-scraper.search("query", engine="bing")                     # force, one-off
+AdvancedSearchScraper(search_engine="yahoo")                 # start elsewhere
+AdvancedSearchScraper(fallback=False)                        # single engine
+AdvancedSearchScraper(fallback_engines=["mojeek", "yahoo"])  # custom order
+AdvancedSearchScraper(mode="aggregate")                      # fan out by default
+scraper.search("query", engine="duckduckgo")                 # force, one-off
+scraper.engines_honoring_site()                              # trust these for absence
 ```
 
-Add your own engine with `register_engine()`. Full details, including the result
-dict and redirect handling, are in
+Each engine declares what it can do, so you do not have to discover it by
+observation:
+
+```python
+scraper.capabilities("yahoo")
+# {"js": False, "snippets": True, "honors_site": True, "provider": "bing", "method": "GET", ...}
+```
+
+Add your own engine with `register_engine()`: a spec can set the HTTP method,
+form or query builder, cookies, headers, a per-request URL builder, a pre-flight
+hook, a redirect unwrapper and "no results" markers. Details in
 [DOCS.md](DOCS.md#search-engines).
-
-Each engine declares what it can do — whether it needs a browser (`js`) and
-whether it returns description text (`snippets`) — so you do not have to
-discover it by observation:
-
-```python
-scraper.capabilities("duckduckgo_lite")
-# {"js": False, "snippets": False, ...}   -> fast, but match on titles
-```
 
 ## More
 
 - [Full documentation](DOCS.md) — every class, argument and CLI flag
-- [Changelog](CHANGELOG.md) — what changed in 1.0, and the two breaking changes
+- [Changelog](CHANGELOG.md) — what changed in 1.1 and 1.0
+- [Roadmap](TODO.md) — what is coming: async API, Puppeteer/Cypress bridges, MCP server, and more
+- [llms.txt](llms.txt) — a compact API summary for LLMs and coding assistants
 - [Search results](DOCS.md#search-results) — `SearchResponse`, `blocked`, per-engine attempts
-- [Transports](DOCS.md#transports-and-browserless-mode) — running without Chrome
+- [Transports](DOCS.md#transports-and-browserless-mode) — impersonation, plain HTTP, Selenium, Playwright
+- [Aggregate mode](DOCS.md#aggregate-mode) and the [circuit breaker](DOCS.md#circuit-breaker)
+- [Playwright](DOCS.md#playwright) — `extract()`, `capture_json()`, stealth, tracing
 - [Deployment](DOCS.md#deployment) — the Dockerfile, and skipping Chrome entirely
 - [Python API](DOCS.md#python-api) — `Headless`, `ExtendedHeadless`, `MultiDriverManager`, `AdvancedSearchScraper`, `SearchScraper`
 - [Timeouts](DOCS.md#timeouts) and [troubleshooting](DOCS.md#troubleshooting)

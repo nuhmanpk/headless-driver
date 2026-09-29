@@ -18,6 +18,10 @@ from headless import (
     find_chromedriver_path,
 )
 from headless.scraper import ENGINE_SPECS, DEFAULT_ENGINE, DEFAULT_FALLBACK_ENGINES
+try:
+    from .support import HermeticTestCase
+except ImportError:  # run as top-level modules by `discover -s tests`
+    from support import HermeticTestCase
 
 # Markup mirroring the html.duckduckgo.com endpoint, so the real default
 # selectors are what the fixtures exercise.
@@ -111,24 +115,31 @@ def network_available() -> bool:
     return False
 
 
-class TestEngineRegistry(unittest.TestCase):
+class TestEngineRegistry(HermeticTestCase):
     """Engine wiring, needing neither a browser nor the network."""
 
-    def test_duckduckgo_is_the_default_and_uses_the_no_js_endpoint(self):
-        self.assertEqual(DEFAULT_ENGINE, "duckduckgo")
+    def test_brave_is_the_default_and_duckduckgo_uses_the_no_js_endpoint(self):
+        # Brave answers from datacentre addresses and honours site: paths.
+        self.assertEqual(DEFAULT_ENGINE, "brave")
         self.assertIn("html.duckduckgo.com", DDG_SPEC["url"])
+        self.assertEqual(DDG_SPEC["method"], "POST")
 
     def test_every_engine_spec_is_complete(self):
         for name, spec in ENGINE_SPECS.items():
             with self.subTest(engine=name):
                 self.assertLessEqual({"url", "result", "link", "title", "snippet"},
                                      set(spec))
-                self.assertIn("{query}", spec["url"])
+                # Either a legacy URL template or a params builder carries the query.
+                self.assertTrue("{query}" in spec["url"] or callable(spec.get("params")))
+                self.assertIn("honors_site", spec)
+                self.assertIn("provider", spec)
 
     def test_fallback_chain_is_tried_after_the_primary(self):
         scr = AdvancedSearchScraper()
         order = scr._engine_order()
-        self.assertEqual(order[0], "duckduckgo")
+        self.assertEqual(order[0], "brave")
+        # Bing ignores site: paths, so it is the last resort.
+        self.assertEqual(order[-1], "bing")
         # Every documented fallback participates, exactly once each.
         for name in DEFAULT_FALLBACK_ENGINES:
             self.assertIn(name, order)
@@ -141,7 +152,7 @@ class TestEngineRegistry(unittest.TestCase):
 
     def test_fallback_can_be_disabled(self):
         scr = AdvancedSearchScraper(fallback=False)
-        self.assertEqual(scr._engine_order(), ["duckduckgo"])
+        self.assertEqual(scr._engine_order(), ["brave"])
 
     def test_starting_engine_still_uses_the_chain(self):
         # `engine=` used to silently disable fallback while `search_engine=`
@@ -183,7 +194,7 @@ class TestEngineRegistry(unittest.TestCase):
                 self.assertIn("%26", url)
 
 
-class TestRedirectUnwrapping(unittest.TestCase):
+class TestRedirectUnwrapping(HermeticTestCase):
     unwrap = staticmethod(AdvancedSearchScraper._unwrap_redirect)
 
     def test_duckduckgo_redirect(self):
@@ -209,7 +220,7 @@ class TestRedirectUnwrapping(unittest.TestCase):
             self.assertEqual(self.unwrap(url), url)
 
 
-class TestExport(unittest.TestCase):
+class TestExport(HermeticTestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.scr = AdvancedSearchScraper()
@@ -243,7 +254,7 @@ class TestExport(unittest.TestCase):
         self.assertFalse(self.scr.export(os.path.join(self.tmp, "r.csv")))
 
 
-class TestDriverOptions(unittest.TestCase):
+class TestDriverOptions(HermeticTestCase):
     def test_default_driver_path_is_not_hardcoded(self):
         hl = Headless()
         try:
@@ -291,7 +302,7 @@ class TestDriverOptions(unittest.TestCase):
 
 
 @unittest.skipUnless(chrome_available(), "no chromedriver available")
-class TestFallbackChain(unittest.TestCase):
+class TestFallbackChain(HermeticTestCase):
     """The chain is driven from local files, so it needs no network at all."""
 
     @classmethod
@@ -442,7 +453,7 @@ class TestFallbackChain(unittest.TestCase):
 
 
 @unittest.skipUnless(chrome_available(), "no chromedriver available")
-class TestBrowserLifecycle(unittest.TestCase):
+class TestBrowserLifecycle(HermeticTestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.mkdtemp()
@@ -498,7 +509,7 @@ class TestBrowserLifecycle(unittest.TestCase):
 @unittest.skipUnless(chrome_available() and live_tests_enabled(),
                      "needs a chromedriver and internet access "
                      "(set SKIP_LIVE_TESTS=1 to skip deliberately)")
-class TestLiveSearch(unittest.TestCase):
+class TestLiveSearch(HermeticTestCase):
     """End-to-end against the real engines."""
 
     def test_search_returns_real_results_quickly(self):

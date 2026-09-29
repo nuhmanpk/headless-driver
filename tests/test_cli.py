@@ -15,6 +15,10 @@ from headless.ui import (
     visible_width, truncate, enable_windows_ansi, LEVELS,
 )
 from headless.scraper import ENGINE_SPECS, DEFAULT_ENGINE
+try:
+    from .support import HermeticTestCase
+except ImportError:  # run as top-level modules by `discover -s tests`
+    from support import HermeticTestCase
 
 
 def buffer_console(**kwargs) -> tuple:
@@ -24,7 +28,7 @@ def buffer_console(**kwargs) -> tuple:
     return Console(stream=stream, **kwargs), stream
 
 
-class TestColorDetection(unittest.TestCase):
+class TestColorDetection(HermeticTestCase):
     def setUp(self):
         self.env = mock.patch.dict(os.environ, {}, clear=False)
         self.env.start()
@@ -56,7 +60,7 @@ class TestColorDetection(unittest.TestCase):
         self.assertFalse(supports_color(io.StringIO()))
 
 
-class TestPortability(unittest.TestCase):
+class TestPortability(HermeticTestCase):
     """Colour must behave on macOS, Linux, Windows and CI log viewers."""
 
     def setUp(self):
@@ -172,7 +176,7 @@ class TestPortability(unittest.TestCase):
         self.assertTrue(supports_unicode(Utf8()))
 
 
-class TestDiagnostics(unittest.TestCase):
+class TestDiagnostics(HermeticTestCase):
     @staticmethod
     def _stream(encoding=None):
         # StringIO.encoding is read-only, so declare it on a subclass.
@@ -194,7 +198,10 @@ class TestDiagnostics(unittest.TestCase):
         self.assertIn("\033[31m", seen["error"])     # red
         self.assertIn("\033[33m", seen["warn"])      # yellow
         self.assertIn("\033[32m", seen["success"])   # green
-        self.assertIn("\033[90m", seen["info"])      # grey
+        self.assertIn("\033[94", seen["info"])      # bright blue
+        self.assertIn("\033[95m", seen["debug"])    # magenta
+        # Every level has a badge of its own, not just a coloured body.
+        self.assertEqual(len({v.split(" ")[0] for v in seen.values()}), len(LEVELS))
 
     def test_warn_and_error_carry_a_marker(self):
         self.assertIn("!", self._emit("careful", "warn"))
@@ -210,7 +217,8 @@ class TestDiagnostics(unittest.TestCase):
 
     def test_component_tag_is_highlighted_separately(self):
         out = self._emit("[Headless] starting up", "info")
-        self.assertIn("\033[36m[Headless]\033[0m", out)   # cyan tag
+        self.assertIn("[Headless]\033[0m", out)        # tag styled on its own
+        self.assertIn("\033[32;1m[Headless]", out)      # in the component's colour
         self.assertIn("starting up", out)
 
     def test_message_without_a_tag_still_renders(self):
@@ -236,7 +244,7 @@ class TestDiagnostics(unittest.TestCase):
         self.assertIn("a diagnostic", err.getvalue())
 
 
-class TestConsole(unittest.TestCase):
+class TestConsole(HermeticTestCase):
     def test_style_emits_ansi_only_when_colour_is_on(self):
         colored, _ = buffer_console(color=True)
         plain, _ = buffer_console(color=False)
@@ -341,7 +349,7 @@ class TestConsole(unittest.TestCase):
         self.assertIn("a diagnostic", err.getvalue())
 
 
-class TestVersionHelpers(unittest.TestCase):
+class TestVersionHelpers(HermeticTestCase):
     def test_major_version_extraction(self):
         self.assertEqual(cli._major("Google Chrome 151.0.7922.140"), "151")
         self.assertEqual(cli._major("ChromeDriver 148.0.7778.179"), "148")
@@ -360,7 +368,7 @@ class TestVersionHelpers(unittest.TestCase):
                              "ChromeDriver 148.0.1")
 
 
-class TestParser(unittest.TestCase):
+class TestParser(HermeticTestCase):
     def setUp(self):
         self.parser = cli.build_parser()
 
@@ -438,7 +446,7 @@ class FakeScraper:
         self.quit_calls += 1
 
 
-class TestCommands(unittest.TestCase):
+class TestCommands(HermeticTestCase):
     def _run(self, argv, scraper_cls=None):
         out = io.StringIO()
         patch = (mock.patch("headless.cli.AdvancedSearchScraper", scraper_cls)
