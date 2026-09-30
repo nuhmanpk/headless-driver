@@ -310,7 +310,7 @@ class TestRequestShapes(HermeticTestCase):
 
     def test_regions(self):
         self.assertEqual(split_region("uk-en"), ("uk", "en"))
-        self.assertEqual(split_region("wt-wt"), (None, "wt"))
+        self.assertEqual(split_region("wt-wt"), (None, None))
         self.assertEqual(split_region(None), (None, None))
 
     def test_android_user_agent(self):
@@ -1271,9 +1271,10 @@ class TestPlaywrightHelpers(HermeticTestCase):
 
 class TestCliPlaywright(HermeticTestCase):
     def _run(self, argv):
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = cli.main(argv)
+        self.stderr = err.getvalue()
         return code, out.getvalue()
 
     def test_extract(self):
@@ -1292,7 +1293,8 @@ class TestCliPlaywright(HermeticTestCase):
             PB.side_effect = RuntimeError("no playwright")
             code, out = self._run(["--no-color", "extract", "https://x", "-f", "t=h1"])
             self.assertEqual(code, cli.EXIT_FAILED)
-            self.assertIn("no playwright", out)
+            self.assertIn("no playwright", self.stderr)   # errors never pollute stdout
+            self.assertEqual(out, "")
         with self.assertRaises(SystemExit):
             with contextlib.redirect_stderr(io.StringIO()):
                 cli.build_parser().parse_args(["extract", "https://x", "-f", "bad"])

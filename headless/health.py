@@ -21,6 +21,9 @@ from .results import EngineAttempt, REFUSAL_BY_ENGINE, STATUS_RATE_LIMITED
 
 log = get_logger("health")
 
+#: The longest Retry-After honoured, in seconds.
+MAX_RETRY_AFTER = 24 * 3600.0
+
 STATE_OK = "ok"
 STATE_COOLING = "cooling"
 #: Resumed after a stand-down: one more refusal re-trips the breaker at once.
@@ -144,8 +147,11 @@ class EngineHealth:
             else:
                 pause = self.backoff_base
             if rate_limited and attempt.retry_after:
-                # The engine said how long; that beats any guess of ours.
-                pause = max(pause, float(attempt.retry_after))
+                # The engine said how long; that beats any guess of ours —
+                # within reason: a day at most, and never a non-number.
+                asked = float(attempt.retry_after)
+                if asked == asked and asked != float("inf"):
+                    pause = max(pause, min(asked, MAX_RETRY_AFTER))
             state.pause = pause
             state.quiet_until = now + pause
             state.resumed_at = state.quiet_until

@@ -205,3 +205,7 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Output of an unquoted `pip install pkg>=1.0`: the shell treats `>` as a
+# redirect and writes pip's log to a file named `=1.0`. Quote the specifier.
+/=*

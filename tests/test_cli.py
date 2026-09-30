@@ -147,21 +147,37 @@ class TestPortability(HermeticTestCase):
                 mock.patch.dict(sys.modules, {"ctypes": fake}):
             self.assertTrue(supports_color(io.StringIO()))
 
+    @staticmethod
+    def _process_stream(fd=1):
+        """A non-terminal stream on the process's own stdout/stderr, like CI's."""
+        stream = io.StringIO()
+        stream.fileno = lambda: fd
+        return stream
+
     def test_ci_log_viewers_get_colour_without_a_tty(self):
         for var in ("GITHUB_ACTIONS", "GITLAB_CI", "CODEBUILD_BUILD_ID"):
-            with self.subTest(ci=var):
-                os.environ.pop("NO_COLOR", None)
-                os.environ[var] = "true"
-                try:
-                    with mock.patch.object(os, "name", "posix"):
-                        self.assertTrue(supports_color(io.StringIO()))
-                finally:
-                    os.environ.pop(var)
+            for fd in (1, 2):
+                with self.subTest(ci=var, fd=fd):
+                    os.environ.pop("NO_COLOR", None)
+                    os.environ[var] = "true"
+                    try:
+                        with mock.patch.object(os, "name", "posix"):
+                            self.assertTrue(supports_color(self._process_stream(fd)))
+                    finally:
+                        os.environ.pop(var)
+
+    def test_ci_does_not_colour_buffers_or_files(self):
+        # Captured output must stay plain even on CI, or tests and log files
+        # fill with escape codes.
+        os.environ["GITHUB_ACTIONS"] = "true"
+        with mock.patch.object(os, "name", "posix"):
+            self.assertFalse(supports_color(io.StringIO()))
+            self.assertFalse(supports_color(self._process_stream(fd=7)))
 
     def test_no_color_still_wins_on_ci(self):
         os.environ["GITHUB_ACTIONS"] = "true"
         os.environ["NO_COLOR"] = "1"
-        self.assertFalse(supports_color(io.StringIO()))
+        self.assertFalse(supports_color(self._process_stream()))
 
     def test_plain_redirected_output_stays_plain(self):
         with mock.patch.object(os, "name", "posix"):
@@ -553,8 +569,11 @@ class TestCommands(HermeticTestCase):
             def search(self, *a, **k):
                 raise RuntimeError("engine exploded")
 
-        with self.assertRaises(RuntimeError):
-            self._run(["search", "python"], Boom)
+        # Reported as a failure (exit 2, message on stderr), not a traceback —
+        # and the driver is still quit.
+        code, out = self._run(["search", "python"], Boom)
+        self.assertEqual(code, 2)
+        self.assertNotIn("engine exploded", out)
         self.assertEqual(instances[0].quit_calls, 1)
 
     def test_json_mode_never_colours_its_output(self):

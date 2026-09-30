@@ -365,7 +365,9 @@ class TestThroughPlaywright(E2ECase):
         self.assertEqual(response.attempts[0].http_status, 403)
 
     def test_browser_engines_in_auto_mode_use_playwright(self):
-        scr = self.scraper(BROWSERLESS[0], browser="playwright")
+        # "auto" may start a browser for a JavaScript engine; "impersonate" and
+        # "http" never do (see test_browserless_transport_never_starts_a_browser).
+        scr = self.scraper("auto", browser="playwright")
         scr.engines["mojeek"]["js"] = True
         response = scr.search("credo", engine="mojeek", fallback=False)
         self.assertEqual(response.attempts[0].transport, "playwright")
@@ -417,11 +419,109 @@ class TestThroughPlaywright(E2ECase):
         self.assertEqual([r["url"] for r in captured[0]["json"]["results"]],
                          [u for u, _, _ in EXPECTED])
 
+    def test_dedicated_thread_serves_every_caller_with_one_browser(self):
+        import threading
+        from headless.playwright_driver import PlaywrightBrowser
+        browser = PlaywrightBrowser(dedicated_thread=True)
+        results = []
+
+        def work():
+            results.append(browser.extract(SITE.url + "/", {"h": "h1"}))
+        threads = [threading.Thread(target=work) for _ in range(5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(len(results), 5)
+        self.assertEqual(len(browser._all), 1)      # not one browser per calling thread
+        with self.assertRaises(Exception):
+            browser.fetch_html("http://127.0.0.1:9/")   # refused: no page left behind
+        browser.close()
+        self.assertIsNone(browser._executor)
+
     def test_rotate_discards_cookies(self):
         ctx = self.browser.context("rot")
         ctx.add_cookies([{"name": "seen", "value": "1", "url": SITE.url}])
         self.browser.rotate("rot")
         self.assertEqual(self.browser.context("rot").cookies(), [])
+
+
+class TestAgentFeatures(E2ECase):
+    """1.2 features over real sockets: Markdown, caching, pagination-free
+    tools, and the MCP server."""
+
+    def test_fetch_markdown_reads_the_main_content(self):
+        from headless import fetch_markdown
+        doc = fetch_markdown(SITE.url + "/article.html", render="never", chunk_tokens=60,
+                             overlap=0)
+        self.assertEqual(doc.title, "Credo Capital people directory")
+        self.assertEqual(doc.status, 200)
+        self.assertIn(doc.transport, ("impersonate", "http"))
+        self.assertTrue(doc.markdown.startswith("# Credo Capital people directory"))
+        for row in DATA["results"]:
+            self.assertIn(f"]({row.get('href') or row['url']})", doc.markdown)
+        self.assertIn("[About **Example** Domain]", doc.markdown)   # inline markup kept
+        self.assertIn("```python\nfrom headless import fetch_markdown", doc.markdown)
+        self.assertIn("| yahoo | bing |", doc.markdown)
+        for boilerplate in ("Home", "We use cookies", "Related: nothing", "2026 e2e"):
+            self.assertNotIn(boilerplate, doc.markdown)
+        self.assertIn((f"the Brave page", SITE.url + "/brave.html"), doc.links)
+        self.assertTrue(doc.chunks and all(c.tokens <= 60 for c in doc.chunks))
+        self.assertIn("People", " ".join(c.heading for c in doc.chunks))
+
+    def test_render_auto_uses_a_browser_only_when_needed(self):
+        from headless import fetch_markdown
+        static = fetch_markdown(SITE.url + "/article.html")
+        self.assertNotEqual(static.transport, "playwright")
+        if not playwright_usable():
+            self.skipTest("Playwright not available")
+        rendered = fetch_markdown(SITE.url + "/app.html")
+        self.assertEqual(rendered.transport, "playwright")
+        self.assertIn("Rendered by JavaScript", rendered.markdown)
+        http_only = fetch_markdown(SITE.url + "/app.html", render="never")
+        self.assertNotIn("Rendered by JavaScript", http_only.markdown)
+
+    def test_cache_means_the_second_search_sends_nothing(self):
+        scr = self.scraper(BROWSERLESS[0], cache="memory")
+        first = scr.search("credo capital", engine="brave", fallback=False)
+        second = scr.search("Credo   Capital", engine="brave", fallback=False)
+        self.assertEqual(len(SITE.requests_to("brave")), 1)
+        self.assertTrue(second.cached)
+        self.assertEqual(list(first), list(second))
+        self.assertGroundTruth(second, "brave")
+
+    def test_toolkit_search_then_read(self):
+        from headless import Toolkit
+        scr = self.scraper(BROWSERLESS[0])
+        toolkit = Toolkit(scraper=scr)
+        found = json.loads(toolkit.call("web_search", {"query": "credo capital", "max_results": 3}))
+        self.assertEqual([r["url"] for r in found["results"]], [u for u, _, _ in EXPECTED[:3]])
+        page = json.loads(toolkit.call("fetch_page", {"url": SITE.url + "/article.html",
+                                                      "render": "never"}))
+        self.assertIn("Credo Capital people directory", page["markdown"])
+
+    def test_mcp_session(self):
+        try:
+            from mcp.client import Client
+            from headless.mcp_server import build_server
+        except ImportError:
+            self.skipTest("the mcp SDK (2.x) is not installed")
+        import asyncio
+        import logging
+        from headless import Toolkit
+        server = build_server(Toolkit(scraper=self.scraper(BROWSERLESS[0])))
+
+        async def session():
+            async with Client(server) as client:
+                found = await client.call_tool("search", {"query": "credo capital"})
+                page = await client.call_tool("fetch_page", {"url": SITE.url + "/article.html",
+                                                            "render": "never"})
+                return json.loads(found.content[0].text), json.loads(page.content[0].text)
+
+        logging.getLogger("mcp").setLevel(logging.WARNING)
+        found, page = asyncio.run(session())
+        self.assertEqual(len(found["results"]), len(EXPECTED))
+        self.assertIn("People", page["markdown"])
 
 
 if __name__ == "__main__":

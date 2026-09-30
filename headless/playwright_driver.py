@@ -26,7 +26,10 @@ Requires the optional extra and a browser build::
     playwright install chromium
 """
 
+import re
+import functools
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Pattern, Sequence, Tuple, Union
 from urllib.parse import urlparse, unquote
 
@@ -117,7 +120,10 @@ def proxy_settings(proxy: Optional[str]) -> Optional[Dict[str, str]]:
     if not proxy:
         return None
     parts = urlparse(proxy if "://" in proxy else f"http://{proxy}")
-    out = {"server": f"{parts.scheme}://{parts.hostname}" + (f":{parts.port}" if parts.port else "")}
+    host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"   # IPv6 literals keep their brackets
+    out = {"server": f"{parts.scheme}://{host}" + (f":{parts.port}" if parts.port else "")}
     if parts.username:
         out["username"] = unquote(parts.username)
     if parts.password:
@@ -125,12 +131,26 @@ def proxy_settings(proxy: Optional[str]) -> Optional[Dict[str, str]]:
     return out
 
 
+def _owned(method):
+    """Run `method` on the browser's own thread when it has one."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        executor = self._executor
+        if executor is None or threading.get_ident() == self._owner:
+            return method(self, *args, **kwargs)
+        return executor.submit(method, self, *args, **kwargs).result()
+    return wrapper
+
+
 class PlaywrightBrowser:
     """A Playwright-driven browser with scraping conveniences built in.
 
-    Every public method is safe to call from any thread: each thread gets its
-    own Playwright instance, because Playwright's sync API is bound to the
-    thread that started it.
+    Every public method is safe to call from any thread. By default each
+    thread gets its own Playwright instance, because Playwright's sync API is
+    bound to the thread that started it. With ``dedicated_thread=True`` all
+    work runs on one thread the browser owns instead — use that when calls
+    come from a changing pool of threads (an async server, MCP), where
+    per-thread browsers would pile up as threads come and go.
 
     ::
 
@@ -151,7 +171,8 @@ class PlaywrightBrowser:
                  block_resources: Union[bool, Sequence[str]] = True,
                  timeout: float = 20.0, trace_dir: Optional[str] = None,
                  extra_headers: Optional[Dict[str, str]] = None,
-                 launch_args: Optional[Sequence[str]] = None):
+                 launch_args: Optional[Sequence[str]] = None,
+                 dedicated_thread: bool = False):
         ok, why = playwright_available()
         if not ok:
             raise RuntimeError(
@@ -181,6 +202,15 @@ class PlaywrightBrowser:
         self._local = threading.local()
         self._all: List[Tuple[Any, Any]] = []
         self._lock = threading.Lock()
+        self._owner: Optional[int] = None
+        self._executor: Optional[ThreadPoolExecutor] = None
+        if dedicated_thread:
+            self._executor = ThreadPoolExecutor(max_workers=1,
+                                                thread_name_prefix="headless-playwright",
+                                                initializer=self._claim_thread)
+
+    def _claim_thread(self) -> None:
+        self._owner = threading.get_ident()
 
     # ------------------------------------------------------------ plumbing
     def _browser(self):
@@ -221,8 +251,13 @@ class PlaywrightBrowser:
             options["extra_http_headers"] = self.extra_headers
         return options
 
+    @_owned
     def context(self, key: str = "default"):
-        """This thread's browser context for `key`, created on first use."""
+        """This thread's browser context for `key`, created on first use.
+
+        Keys ending ``#media`` (used for screenshots and PDFs) never block
+        resources, whatever `block_resources` says.
+        """
         state = self._browser()
         ctx = state["contexts"].get(key)
         if ctx is None:
@@ -231,8 +266,8 @@ class PlaywrightBrowser:
             ctx.set_default_navigation_timeout(self.timeout_ms)
             if self.stealth:
                 ctx.add_init_script(STEALTH_SCRIPT)
-            if self.blocked_resources:
-                blocked = self.blocked_resources
+            blocked = set() if key.endswith("#media") else set(self.blocked_resources)
+            if blocked:
 
                 def route(r):
                     if r.request.resource_type in blocked:
@@ -244,6 +279,7 @@ class PlaywrightBrowser:
             state["contexts"][key] = ctx
         return ctx
 
+    @_owned
     def rotate(self, key: str = "default") -> None:
         """Discard `key`'s context — cookies, storage, fingerprint state — for a fresh one."""
         state = getattr(self._local, "state", None)
@@ -268,7 +304,11 @@ class PlaywrightBrowser:
 
     def _open(self, url: str, key: str, wait_for: str = "", wait_until: str = "domcontentloaded"):
         page = self.context(key).new_page()
-        response = page.goto(url, wait_until=wait_until)
+        try:
+            response = page.goto(url, wait_until=wait_until)
+        except Exception:
+            page.close()   # a failed navigation must not leak its page
+            raise
         if wait_for:
             try:
                 page.wait_for_selector(wait_for, timeout=min(self.timeout_ms, 8000))
@@ -277,6 +317,7 @@ class PlaywrightBrowser:
         return page, response
 
     # -------------------------------------------------------------- basics
+    @_owned
     def fetch_html(self, url: str, key: str = "default", wait_for: str = "") -> Tuple[str, int]:
         """Load `url` and return ``(html, status)``."""
         page, response = self._open(url, key, wait_for)
@@ -285,6 +326,7 @@ class PlaywrightBrowser:
         finally:
             page.close()
 
+    @_owned
     def fetch_page(self, url: str, key: str = "default", wait_for: str = "") -> Page:
         """Load `url` as a :class:`~headless.transport.Page`, with status and headers."""
         page, response = self._open(url, key, wait_for)
@@ -297,17 +339,13 @@ class PlaywrightBrowser:
             page.close()
         return Page(parse_html(html, final_url), final_url, status, headers, "playwright")
 
+    @_owned
     def screenshot(self, url: str, path: str, full_page: bool = True,
                    key: str = "default", wait_for: str = "") -> bool:
         """Save a screenshot of `url`. Images are loaded for this, whatever
         `block_resources` says, because a screenshot without them is useless."""
         import os
-        key = f"{key}#media"
-        saved_block, self.blocked_resources = self.blocked_resources, set()
-        try:
-            page, _ = self._open(url, key, wait_for, wait_until="load")
-        finally:
-            self.blocked_resources = saved_block
+        page, _ = self._open(url, f"{key}#media", wait_for, wait_until="load")
         try:
             parent = os.path.dirname(os.path.abspath(path))
             os.makedirs(parent, exist_ok=True)
@@ -319,6 +357,7 @@ class PlaywrightBrowser:
         finally:
             page.close()
 
+    @_owned
     def pdf(self, url: str, path: str, key: str = "default") -> bool:
         """Save `url` as PDF (Chromium only)."""
         import os
@@ -336,6 +375,7 @@ class PlaywrightBrowser:
             page.close()
 
     # ------------------------------------------------------ scraping extras
+    @_owned
     def extract(self, url: str, schema: Dict[str, str], item_selector: Optional[str] = None,
                 key: str = "default", scroll: int = 0) -> Union[Dict[str, str], List[Dict[str, str]]]:
         """Pull structured data out of a page with a declarative schema.
@@ -370,6 +410,7 @@ class PlaywrightBrowser:
         finally:
             page.close()
 
+    @_owned
     def capture_json(self, url: str, pattern: Union[str, Pattern] = "",
                      key: str = "default", wait: float = 1.5,
                      action: Optional[Callable[[Any], None]] = None) -> List[Dict[str, Any]]:
@@ -419,6 +460,18 @@ class PlaywrightBrowser:
 
     # ---------------------------------------------------------- lifecycle
     def close(self) -> None:
+        executor = self._executor
+        if executor is not None:
+            if threading.get_ident() != self._owner:
+                try:
+                    executor.submit(self._close).result()
+                finally:
+                    executor.shutdown(wait=True)
+                    self._executor = None
+                return
+        self._close()
+
+    def _close(self) -> None:
         state = getattr(self._local, "state", None)
         if state:
             for key, ctx in list(state["contexts"].items()):
@@ -457,10 +510,26 @@ def _normalize(data):
 
 
 def _split_selector(selector: str) -> List[str]:
-    """``"a.title@href"`` → ``["a.title", "href"]``; ``"h2"`` → ``["h2", ""]``."""
-    if "@" in selector:
-        css, attr = selector.rsplit("@", 1)
-        return [css.strip(), attr.strip()]
+    """``"a.title@href"`` → ``["a.title", "href"]``; ``"h2"`` → ``["h2", ""]``.
+
+    Only a trailing ``@name`` outside brackets and quotes is an attribute
+    request, so ``a[href*='@']`` stays a selector.
+    """
+    depth, quote, split_at = 0, "", -1
+    for i, ch in enumerate(selector):
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "'\"":
+            quote = ch
+        elif ch in "[(":
+            depth += 1
+        elif ch in "])":
+            depth -= 1
+        elif ch == "@" and depth == 0:
+            split_at = i
+    if split_at >= 0 and re.fullmatch(r"[A-Za-z_:][-\w:.]*", selector[split_at + 1:].strip()):
+        return [selector[:split_at].strip(), selector[split_at + 1:].strip()]
     return [selector, ""]
 
 

@@ -1,0 +1,101 @@
+site_name: headless-driver
+site_description: Web search, page reading and browser automation for Python and AI agents. Free, fast, no API key.
+site_url: https://nuhmanpk.github.io/headless-driver/
+repo_url: https://github.com/nuhmanpk/headless-driver
+repo_name: nuhmanpk/headless-driver
+edit_uri: edit/main/docs/
+copyright: MIT licensed · nuhmanpk
+
+theme:
+  name: material
+  logo: assets/logo.png
+  favicon: assets/logo.png
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.action.edit
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: cyan
+      toggle: {icon: material/brightness-7, name: Dark mode}
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: cyan
+      toggle: {icon: material/brightness-4, name: Light mode}
+  icon:
+    repo: fontawesome/brands/github
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Guides:
+      - Search: guides/search.md
+      - Reading pages (Markdown for LLMs): guides/markdown.md
+      - AI agents & tools: guides/agents.md
+      - MCP server: guides/mcp.md
+      - Caching & pagination: guides/caching.md
+      - Playwright: guides/playwright.md
+      - Command line: guides/cli.md
+  - Reference manual: manual.md
+  - API reference:
+      - AdvancedSearchScraper: api/scraper.md
+      - Results & models: api/results.md
+      - Tools & MCP: api/tools.md
+      - Markdown: api/markdown.md
+      - Cache & health: api/cache.md
+      - Transports & browsers: api/transports.md
+  - Changelog: changelog.md
+  - Roadmap: roadmap.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [.]
+          options:
+            docstring_style: google
+            show_source: false
+            show_root_heading: true
+            show_signature_annotations: true
+            separate_signature: true
+            members_order: source
+            filters: ["!^_"]
+            merge_init_into_class: true
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
+
+validation:
+  links:
+    # The included README/DOCS/CHANGELOG link to repository files that are not
+    # part of the site; those links work on GitHub and are reported, not fatal.
+    not_found: info
+    unrecognized_links: info
+    anchors: info

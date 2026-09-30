@@ -1,13 +1,14 @@
 # headless-driver
 
-> Fast multi-engine web search scraper for Python — Brave, DuckDuckGo, Yahoo, Mojeek, Google, Bing, Startpage, Yandex — with browser TLS impersonation (curl_cffi), consensus ranking across engines, honest block detection (blocked / rate_limited / unparsed vs empty), per-engine circuit breakers, and Selenium or Playwright browser automation (screenshots, PDF, structured extraction). No API key. `pip install "headless-driver[impersonate]"`. Python 3.9+. MIT.
+> Web search for Python and AI agents. Free, fast, no API key. Search Brave, DuckDuckGo, Yahoo, Mojeek, Google and Bing; read any page as clean, token-counted, chunked Markdown (`fetch_markdown`); give both to an agent as OpenAI, Anthropic, LangChain, LlamaIndex or CrewAI tools (`Toolkit`) or over MCP (`headless-driver mcp`). Browser TLS impersonation (curl_cffi), consensus ranking across engines, honest block detection (blocked / rate_limited vs empty), circuit breakers, caching (memory/SQLite/Redis), pagination, Selenium and Playwright. `pip install "headless-driver[impersonate]"`. Python 3.9+ (MCP: 3.10+). MIT.
 
-Use it when code needs web search results without a paid SERP API, needs to work from cloud/datacentre IPs, or must tell "no results" apart from "the engine refused". It is a free alternative to SerpAPI-style services and a more reliable, more observable alternative to `duckduckgo_search`/`ddgs` for scraping.
+Use it when an application or agent needs web search results without a paid SERP API, needs to read web pages as LLM-ready text, needs to work from cloud IPs, or must tell "no results" apart from "the engine refused". A free alternative to SerpAPI/Tavily-style search APIs and to `duckduckgo_search`/`ddgs`.
 
 ## Install
 
 - `pip install "headless-driver[impersonate]"` — recommended; browserless search with a real browser TLS fingerprint
 - `pip install "headless-driver[playwright]" && playwright install chromium` — Playwright backend, `extract()`, `capture_json()`
+- `pip install "headless-driver[mcp]"` — MCP server; `[agents]` — LangChain tools; `[redis]` — shared cache; `[tokens]` — exact token counts
 - `pip install "headless-driver[all]"` — everything; `pip install headless-driver` — Selenium only
 
 ## Core API
@@ -33,6 +34,31 @@ with AdvancedSearchScraper(max_results=10, region="us-en") as s:
 - `raise_on_block=True` raises `AllEnginesBlocked`; `circuit_breaker=False` disables stand-downs
 - `ScraperPool(size=4, **kwargs).map(queries)` for parallel browser work; `search_batch(queries, max_workers=8)` browserless
 
+- `pages=3` paginates; `cache="memory" | "sqlite:///p.db" | "redis://…"` caches per engine; `r.cached`
+- `r.typed()` → `SearchResult` dataclasses; `r.to_pydantic()` → pydantic models
+
+## Reading pages
+
+```python
+from headless import fetch_markdown
+doc = fetch_markdown(url, chunk_tokens=500, max_tokens=None, render="auto")  # render: auto|never|always
+doc.title, doc.markdown, doc.tokens, doc.links, doc.chunks  # chunks: index, text, tokens, heading
+```
+
+## Agent tools
+
+```python
+from headless import Toolkit
+tk = Toolkit(region="us-en")                     # tools: web_search, fetch_page, extract_data, screenshot
+tk.anthropic_tools(); tk.handle_anthropic_tool_use(response.content)
+tk.openai_tools();    tk.handle_openai_tool_calls(message.tool_calls)
+tk.langchain_tools(); tk.llamaindex_tools(); tk.crewai_tools(); tk.call("web_search", {"query": "..."})
+```
+
+## MCP
+
+`headless-driver mcp` (stdio; `--transport streamable-http --port 8000` for remote). Tools: search, search_aggregate, fetch_page, extract, screenshot. Client config: `{"mcpServers": {"web": {"command": "headless-driver", "args": ["mcp"]}}}`. Claude Code: `claude mcp add web -- headless-driver mcp`.
+
 ## Playwright
 
 ```python
@@ -47,6 +73,8 @@ with PlaywrightBrowser(block_resources=True, proxy="http://user:pass@host:8080")
 
 - `headless-driver search "query" [--mode aggregate] [--region uk-en] [--transport impersonate] [--json]`
 - `headless-driver engines` · `doctor [--engines]` · `bench [--min-ok-rate 0.5]`
+- `headless-driver fetch URL [--max-tokens N] [--chunk N] [--json]` — page as Markdown
+- `headless-driver mcp [--print-config]` — MCP server
 - `headless-driver extract URL --item CSS -f name=css -f link=a@href --json`
 - `headless-driver shot|pdf URL -o FILE [--browser playwright --full-page]`
 
@@ -56,8 +84,9 @@ Silent by default (NullHandler). `enable_console_logging()`, `HEADLESS_DRIVER_LO
 
 ## Docs
 
+- [Documentation site](https://nuhmanpk.github.io/headless-driver/): guides and API reference
 - [README](https://github.com/nuhmanpk/headless-driver/blob/main/README.md): overview, performance numbers
 - [DOCS.md](https://github.com/nuhmanpk/headless-driver/blob/main/DOCS.md): full API, CLI, transports, aggregate mode, circuit breaker, Playwright, engine specs
 - [CHANGELOG.md](https://github.com/nuhmanpk/headless-driver/blob/main/CHANGELOG.md)
-- [TODO.md](https://github.com/nuhmanpk/headless-driver/blob/main/TODO.md): roadmap (async API, MCP server, Puppeteer bridge, recorder)
+- [TODO.md](https://github.com/nuhmanpk/headless-driver/blob/main/TODO.md): roadmap (async API, crawling, Puppeteer bridge, recorder)
 - [PyPI](https://pypi.org/project/headless-driver/)

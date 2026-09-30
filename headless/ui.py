@@ -117,7 +117,9 @@ def supports_color(stream=None) -> bool:
 
     Order of precedence: NO_COLOR, FORCE_COLOR, a dumb terminal, then whether
     this is a terminal at all, and finally CI systems that render ANSI in their
-    log viewers.
+    log viewers — but only for the process's own stdout and stderr. A buffer or
+    file the caller passes in (``io.StringIO``, an open log file) stays plain
+    on CI too, or captured output would fill with escape codes.
     """
     stream = stream if stream is not None else sys.stdout
     if os.environ.get("NO_COLOR"):
@@ -134,7 +136,15 @@ def supports_color(stream=None) -> bool:
             return True
     except Exception:
         pass
-    return any(os.environ.get(var) for var in _ANSI_CI_VARS)
+    return _is_process_output(stream) and any(os.environ.get(var) for var in _ANSI_CI_VARS)
+
+
+def _is_process_output(stream) -> bool:
+    """Whether `stream` writes to this process's stdout or stderr descriptor."""
+    try:
+        return stream.fileno() in (1, 2)
+    except Exception:  # StringIO and friends have no descriptor
+        return False
 
 
 def supports_unicode(stream=None) -> bool:

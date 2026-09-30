@@ -36,6 +36,7 @@ SKIP_COOLING = "cooling"              # its circuit breaker is open
 SKIP_IGNORES_SITE = "ignores_site"    # the query uses site:, which it ignores
 SKIP_BROWSER_WITHDRAWN = "browser_withdrawn"  # the address is throttled; Chrome won't help
 SKIP_DUPLICATE_PROVIDER = "duplicate_provider"  # a sibling on the same index answered
+SKIP_CONSENSUS = "consensus_reached"  # aggregate mode had its answer before this engine
 
 
 @dataclass
@@ -51,8 +52,15 @@ class EngineAttempt:
     http_status: Optional[int] = None
     #: Seconds the engine asked us to wait (``Retry-After``), when it said.
     retry_after: Optional[float] = None
-    #: Which transport fetched the page: ``impersonate``, ``http`` or ``browser``.
+    #: Which transport fetched the page: ``impersonate``, ``http``, ``browser``,
+    #: ``playwright`` — or ``cache`` when no request was made.
     transport: str = ""
+    #: Which results page this was, when paginating.
+    page: int = 1
+
+    @property
+    def cached(self) -> bool:
+        return self.transport == "cache"
 
     @property
     def ok(self) -> bool:
@@ -78,7 +86,13 @@ class EngineAttempt:
         return {"engine": self.engine, "status": self.status, "count": self.count,
                 "reason": self.reason, "elapsed": round(self.elapsed, 3),
                 "http_status": self.http_status, "retry_after": self.retry_after,
-                "transport": self.transport}
+                "transport": self.transport, "page": self.page}
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "EngineAttempt":
+        known = {"engine", "status", "count", "reason", "elapsed", "http_status",
+                 "retry_after", "transport", "page"}
+        return cls(**{k: v for k, v in data.items() if k in known})
 
 
 class SearchResponse(list):
@@ -175,7 +189,36 @@ class SearchResponse(list):
 
     @property
     def engines_tried(self) -> List[str]:
-        return [a.engine for a in self.attempts]
+        # Unique, in order: a paginated engine has one attempt per page.
+        return list(dict.fromkeys(a.engine for a in self.attempts))
+
+    @property
+    def cached(self) -> bool:
+        """True when every result came from the cache and no engine was asked."""
+        answered = self.answered
+        return bool(answered) and all(a.cached for a in answered)
+
+    # -- typed views -------------------------------------------------------
+    def typed(self):
+        """The results as :class:`~headless.models.SearchResult` dataclasses."""
+        from .models import to_models
+        return to_models(self)
+
+    def to_pydantic(self):
+        """The results as pydantic models (needs pydantic)."""
+        from .models import pydantic_model
+        model = pydantic_model()
+        return [model(**item) for item in self]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "SearchResponse":
+        """Rebuild a response from :meth:`as_dict` output."""
+        return cls(query=data.get("query", ""), results=list(data.get("results") or []),
+                   engine=data.get("engine"),
+                   attempts=[EngineAttempt.from_dict(a) for a in data.get("attempts") or []],
+                   elapsed=data.get("elapsed", 0.0), mode=data.get("mode", "first"),
+                   engines=list(data.get("engines") or []),
+                   skipped=list(data.get("skipped") or []))
 
     def as_dict(self) -> Dict[str, Any]:
         return {

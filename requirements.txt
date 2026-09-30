@@ -4,7 +4,7 @@
 #   pip install "headless-driver[all]"              # everything below
 
 # core (always installed)
-selenium==4.35.0
+selenium>=4.35,<5
 webdriver-manager>=4.0.0
 selenium-stealth>=1.0.6
 geckodriver-autoinstaller>=0.1.0
@@ -21,3 +21,16 @@ playwright>=1.40
 
 # [fast] faster HTML parsing, used automatically when present
 lxml>=4.9
+
+# [mcp] MCP server for AI agents (Python 3.10+)
+mcp>=1.2; python_version >= "3.10"
+
+# [agents] LangChain tools and pydantic schemas
+langchain-core>=0.2
+pydantic>=2
+
+# [tokens] exact token counts for fetch_markdown
+tiktoken>=0.5
+
+# [redis] shared result cache
+redis>=5

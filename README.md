@@ -4,12 +4,10 @@
 
 # headless-driver
 
-### The fast multi-engine search scraper for Python
+### Web search for Python and AI agents
 
-**Search results from Brave, DuckDuckGo, Yahoo, Mojeek, Google and Bing in about a second — no browser, no API key.**<br/>
-Real browser TLS fingerprints, consensus ranking across engines, honest block detection and
-per-engine circuit breakers. Plus Selenium **and Playwright** automation, screenshots, PDF,
-structured extraction and a colourful CLI.
+**Search the web, read any page as clean Markdown, and give your AI agent both.**<br/>
+Free, fast, no API key.
 
 <a href="https://pypi.org/project/headless-driver/"><img alt="PyPI version" src="https://img.shields.io/pypi/v/headless-driver?style=flat-square&logo=pypi&logoColor=white&color=3775A9" /></a>
 <a href="https://pypi.org/project/headless-driver/"><img alt="Python versions" src="https://img.shields.io/pypi/pyversions/headless-driver?style=flat-square&logo=python&logoColor=white" /></a>
@@ -21,6 +19,8 @@ structured extraction and a colourful CLI.
 <a href="https://codecov.io/gh/nuhmanpk/headless-driver"><img alt="Coverage" src="https://img.shields.io/codecov/c/github/nuhmanpk/headless-driver?style=flat-square&logo=codecov&logoColor=white" /></a>
 <img alt="Selenium" src="https://img.shields.io/badge/selenium-4.35-43B02A?style=flat-square&logo=selenium&logoColor=white" />
 <img alt="Playwright" src="https://img.shields.io/badge/playwright-supported-2EAD33?style=flat-square&logo=playwright&logoColor=white" />
+<img alt="MCP" src="https://img.shields.io/badge/MCP-server-8A2BE2?style=flat-square" />
+<a href="https://nuhmanpk.github.io/headless-driver/"><img alt="Docs" src="https://img.shields.io/badge/docs-site-blue?style=flat-square&logo=materialformkdocs&logoColor=white" /></a>
 <img alt="Chrome headless" src="https://img.shields.io/badge/chrome-headless-4285F4?style=flat-square&logo=googlechrome&logoColor=white" />
 <img alt="Platforms" src="https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-lightgrey?style=flat-square" />
 
@@ -41,53 +41,62 @@ structured extraction and a colourful CLI.
 
 ---
 
-## Why headless-driver
+## What you can do
 
-- **Fast** — engines are fetched over HTTP with a real browser's TLS and HTTP/2
-  fingerprint (`curl_cffi`), not by driving Chrome: about a second per query
-  instead of six to nine, megabytes instead of a gigabyte, and thread-safe.
-- **Gets answers where others get CAPTCHAs** — from cloud and datacentre
-  addresses (AWS, ECS, GitHub Actions) a Python TLS stack claiming to be Chrome
-  is refused on sight. headless-driver presents a consistent browser, rotates
-  between Chrome, Edge, Safari and Firefox profiles after a refusal, and asks
-  each engine the way its own front end does.
-- **Accurate** — `mode="aggregate"` asks one engine per independent index at
-  once and ranks results by how many agree. A LinkedIn profile returned by
-  Brave, DuckDuckGo *and* Mojeek is far likelier to be the right person.
-- **Honest** — "nobody has an answer" (`empty`) and "they refused me"
-  (`blocked`, `rate_limited` with `Retry-After`, `unparsed`) are different
-  results. HTTP 403/429/503 are never reported as "no results", so you never
-  store a false negative.
-- **Polite by design** — a per-engine circuit breaker stands an engine down
-  after refusals and escalates the pause; Chrome is not launched when the
-  address itself is throttled.
-- **Browser automation when you need it** — Selenium or Playwright, stealth,
-  proxies (with credentials under Playwright), screenshots, PDF, declarative
-  `extract()` and JSON-API capture.
+- **Search the web from Python** — Brave, DuckDuckGo, Yahoo, Mojeek, Google
+  and Bing. No API key, about a second per search, no browser needed.
+- **Get answers you can trust** — ask several engines at once and rank results
+  by how many agree (`mode="aggregate"`).
+- **Read any page as Markdown** — `fetch_markdown(url)` strips menus, ads and
+  cookie banners, keeps the content, counts tokens and chunks it for RAG.
+- **Give your AI agent the web** — ready-made tools for OpenAI, Anthropic,
+  LangChain, LlamaIndex and CrewAI, and an MCP server for Claude, Cursor and
+  VS Code: `headless-driver mcp`.
+- **Know when you're blocked** — a refusal is reported as `blocked` or
+  `rate_limited`, never as "no results".
+- **Automate a browser when you need one** — Selenium or Playwright,
+  screenshots, PDF, structured extraction.
+
+### How it keeps working
+
+- **Looks like a real browser.** Requests carry a genuine Chrome, Edge, Safari
+  or Firefox TLS and HTTP/2 fingerprint (`curl_cffi`) — the first thing
+  anti-bot systems check, and why plain Python scrapers are refused from cloud
+  servers. The profile rotates after a refusal.
+- **Asks each engine the way its own website does** — DuckDuckGo's POST form,
+  Yahoo's path tokens, Google's Search-App client, regional cookies.
+- **Backs off by itself.** An engine that refuses is stood down and retried
+  later, with longer pauses if it keeps refusing; Chrome is not launched when
+  the address itself is throttled.
+- **Caches answers** in memory, SQLite or Redis, so pipelines and agents never
+  ask the same thing twice.
 
 ### Features
 
 - 11 engines: **Brave**, **DuckDuckGo** (HTML POST form, Lite, JS), **Yahoo**,
   **Mojeek**, **Google** (basic Search-App endpoint and browser), **Startpage**,
   **Yandex**, **Bing**
-- Three browserless transports — `impersonate` (default when installed),
-  plain `http`, or a browser — plus Selenium or Playwright for JavaScript engines
-- Two search modes — `first` (walk a fallback chain) and `aggregate`
-  (parallel fan-out, provider de-duplication, consensus `votes`, deadline)
-- `site:` is enforced: engines that ignore it are skipped, off-target rows dropped
-- Structured `SearchResponse`: per-engine `attempts` with status, HTTP code,
-  `Retry-After`, transport and timing; `blocked`, `cooling`, `skipped`
-- Per-engine `EngineHealth` circuit breaker shared across a process, soft-block
-  detection (`verify_empty`, `probe()`), regional results (`region="uk-en"`)
-- Clean text: HTML entities, Unicode normalisation, zero-width characters, and
-  click-tracking redirects (DuckDuckGo, Google, Bing, Yahoo) all unwrapped; ads dropped
-- `ScraperPool`, `search_batch`, JSON/CSV export
-- `headless-driver` CLI: `search`, `engines`, `doctor`, `bench`, `extract`,
-  `shot`, `pdf` — coloured everywhere, `--json` for piping
-- Coloured, levelled logs — for this package and, on request, for your own
-  logging setup (`colorize_logging()`, `ColorFormatter`)
-- Tested: 360+ unit tests, ~90% coverage, and an end-to-end suite that scrapes a
-  local site with the installed wheel on Linux, macOS and Windows
+- Search modes `first` (fallback chain) and `aggregate` (parallel fan-out,
+  consensus `votes`, deadline); `pages=N` pagination; `site:` enforced
+- `fetch_markdown()`: main-content extraction, absolute links, code and tables
+  kept, token counts, overlapping chunks with heading paths, automatic
+  JavaScript rendering for app-shell pages
+- Agent tools: `Toolkit` → `openai_tools()`, `anthropic_tools()`,
+  `langchain_tools()`, `llamaindex_tools()`, `crewai_tools()`, tool-call handlers
+- MCP server: `search`, `search_aggregate`, `fetch_page`, `extract`,
+  `screenshot` over stdio or HTTP (MCP SDK 1.x and 2.x)
+- Result cache: `cache="memory"`, `"sqlite:///path.db"`, `"redis://…"`
+- Typed results: `response.typed()` dataclasses, `response.to_pydantic()`
+- Honest `SearchResponse`: per-engine attempts with status, HTTP code,
+  `Retry-After`, transport and timing; `blocked`, `cooling`, `cached`, `skipped`
+- Per-engine circuit breaker, soft-block detection, regional results
+- Transports: `impersonate` (default), plain `http`, Selenium or Playwright
+- CLI: `search`, `fetch`, `mcp`, `extract`, `engines`, `doctor`, `bench`,
+  `shot`, `pdf` — coloured output, `--json` for piping
+- Tested: 410+ tests, ~90% coverage, and an end-to-end suite run from the
+  installed wheel on Linux, macOS and Windows
+- [Documentation site](https://nuhmanpk.github.io/headless-driver/) with guides
+  and an API reference
 
 ## Install
 
@@ -102,7 +111,11 @@ pip install headless-driver                  # Selenium only
 | --- | --- | --- |
 | `impersonate` | `curl_cffi`, `beautifulsoup4` | Browser TLS fingerprint; what `transport="auto"` prefers. The one to use from the cloud. |
 | `http` | `requests`, `beautifulsoup4` | Plain browserless fallback |
-| `playwright` | `playwright` | `browser="playwright"`, `extract()`, `capture_json()` |
+| `playwright` | `playwright` | `browser="playwright"`, `extract()`, `capture_json()`, rendering JavaScript pages in `fetch_markdown()` |
+| `mcp` | `mcp` | `headless-driver mcp` (Python 3.10+) |
+| `agents` | `langchain-core`, `pydantic` | `Toolkit.langchain_tools()` and typed tool schemas |
+| `tokens` | `tiktoken` | Exact token counts in `fetch_markdown()` |
+| `redis` | `redis` | `cache="redis://…"` |
 | `fast` | `lxml` | Faster parsing at volume, used automatically |
 
 Needs Python 3.9+. Search needs no browser at all; browser automation needs an
@@ -139,6 +152,36 @@ with AdvancedSearchScraper(max_results=5) as scraper:
     print("answered by", response.engine)
     if response.blocked:                  # every engine refused, not "no results"
         print("blocked:", [str(a) for a in response.refused])
+```
+
+Read a page as Markdown, ready for an LLM:
+
+```python
+from headless import fetch_markdown
+
+doc = fetch_markdown("https://docs.python.org/3/library/asyncio.html", chunk_tokens=500)
+print(doc.title, doc.tokens)
+for chunk in doc.chunks:
+    print(chunk.heading, chunk.tokens)
+```
+
+Give an agent web search and page reading:
+
+```python
+from headless import Toolkit
+
+toolkit = Toolkit()
+response = client.messages.create(model="claude-sonnet-5", tools=toolkit.anthropic_tools(),
+                                  messages=messages, max_tokens=2048)
+messages.append({"role": "user", "content": toolkit.handle_anthropic_tool_use(response.content)})
+# also: openai_tools() / handle_openai_tool_calls(), langchain_tools(),
+#       llamaindex_tools(), crewai_tools()
+```
+
+Or connect Claude Desktop, Claude Code, Cursor or VS Code over MCP:
+
+```json
+{"mcpServers": {"web": {"command": "headless-driver", "args": ["mcp"]}}}
 ```
 
 Ask several engines at once and rank by agreement:
@@ -217,6 +260,9 @@ own servers with `headless-driver bench`.
 ```bash
 headless-driver search "python headless browser" -n 5
 headless-driver search 'site:linkedin.com/in "jane doe"' --mode aggregate --region uk-en
+headless-driver search "python web frameworks" --pages 3 --cache memory
+headless-driver fetch https://example.com > page.md      # clean Markdown
+headless-driver mcp                                      # serve tools to AI agents
 headless-driver search "selenium stealth" --json | jq -r '.results[].url'
 headless-driver search "python" --transport impersonate   # no browser at all
 headless-driver engines                    # engines, capabilities, fallback order
@@ -288,9 +334,12 @@ hook, a redirect unwrapper and "no results" markers. Details in
 
 ## More
 
-- [Full documentation](DOCS.md) — every class, argument and CLI flag
-- [Changelog](CHANGELOG.md) — what changed in 1.1 and 1.0
-- [Roadmap](TODO.md) — what is coming: async API, Puppeteer/Cypress bridges, MCP server, and more
+- [Documentation site](https://nuhmanpk.github.io/headless-driver/) — guides and API reference
+- [Full reference](DOCS.md) — every class, argument and CLI flag
+- [AI agents](DOCS.md#ai-agents-and-tools) and the [MCP server](DOCS.md#mcp-server)
+- [Reading pages as Markdown](DOCS.md#reading-pages-as-markdown) and [caching](DOCS.md#caching-and-pagination)
+- [Changelog](CHANGELOG.md) — what changed in 1.2, 1.1 and 1.0
+- [Roadmap](TODO.md) — what is coming: async API, Puppeteer/Cypress bridges, proxy pools and more
 - [llms.txt](llms.txt) — a compact API summary for LLMs and coding assistants
 - [Search results](DOCS.md#search-results) — `SearchResponse`, `blocked`, per-engine attempts
 - [Transports](DOCS.md#transports-and-browserless-mode) — impersonation, plain HTTP, Selenium, Playwright

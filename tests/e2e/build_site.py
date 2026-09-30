@@ -167,6 +167,32 @@ def new_layout():
                 "never seen.</article></main>")
 
 
+def article():
+    rows = "\n".join(f'<li><a href="{href(r)}">{r["title_html"]}</a> &mdash; {r["snippet_html"]}</li>'
+                     for r in RESULTS)
+    return page("Credo Capital people directory",
+                '<header class="site-header"><nav><a href="/">Home</a> <a href="/about">About</a>'
+                '</nav></header>\n<div class="cookie-banner">We use cookies. <button>OK</button></div>\n'
+                '<main><article><h1>Credo Capital people directory</h1>\n'
+                '<p>Everyone below appears in the <strong>ground truth</strong> used by the '
+                'end-to-end suite. See <a href="/brave.html">the Brave page</a>.</p>\n'
+                f'<h2>People</h2>\n<ul>\n{rows}\n</ul>\n'
+                '<h2>Code</h2>\n<pre><code class="language-python">from headless import fetch_markdown\n'
+                'doc = fetch_markdown(url)</code></pre>\n'
+                '<table><tr><th>Engine</th><th>Index</th></tr><tr><td>yahoo</td><td>bing</td></tr></table>\n'
+                '</article></main>\n<aside class="sidebar">Related: nothing</aside>\n'
+                '<footer>&copy; 2026 e2e</footer>')
+
+
+def app():
+    # Content that only exists once JavaScript has run.
+    return page("App shell", '<div id="root"></div>\n<script>\n'
+                'document.getElementById("root").innerHTML = "<main><h1>Rendered by JavaScript</h1>'
+                '<p>This paragraph was inserted by a script, so only a browser can read it. "'
+                ' + "It is long enough to count as real content for the extractor. ".repeat(8)'
+                ' + "</p></main>";\n</script>')
+
+
 PAGES = {
     "brave.html": brave, "brave_empty.html": brave_empty,
     "duckduckgo.html": duckduckgo, "duckduckgo_empty.html": duckduckgo_empty,
@@ -177,6 +203,7 @@ PAGES = {
     "bing.html": bing,
     "startpage_home.html": startpage_home, "startpage.html": startpage,
     "captcha.html": captcha, "new_layout.html": new_layout,
+    "article.html": article, "app.html": app,
 }
 
 

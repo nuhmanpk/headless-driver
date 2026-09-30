@@ -1,9 +1,10 @@
-"""headless-driver: a fast multi-engine search scraper, and headless Chrome automation.
+"""headless-driver: web search, page reading and browser automation for Python and AI agents.
 
-Scrape Brave, DuckDuckGo, Yahoo, Mojeek, Google, Bing, Startpage and Yandex
-results with browser TLS impersonation, per-engine circuit breakers, block
-detection, and consensus ranking across engines — no browser needed for most
-engines — plus Selenium-driven Chrome for screenshots, PDFs and the rest.
+Search Brave, DuckDuckGo, Yahoo, Mojeek, Google and Bing without an API key,
+read pages as clean Markdown, and hand both to an agent as tools (OpenAI,
+Anthropic, LangChain, LlamaIndex, CrewAI) or over MCP — with browser TLS
+impersonation, consensus ranking, honest block detection, caching and
+Selenium or Playwright automation underneath.
 """
 
 # Imported first: it sets up logging (and quiets an unactionable urllib3
@@ -51,6 +52,10 @@ from .results import (
     STATUS_ERROR,
 )
 from .health import EngineHealth, default_health, reset_default_health
+from .models import SearchResult
+from .cache import SearchCache, MemoryCache, SQLiteCache, RedisCache, make_cache
+from .markdown import fetch_markdown, html_to_markdown, chunk_markdown, count_tokens, MarkdownDocument, Chunk
+from .tools import Toolkit
 from .transport import ImpersonateTransport, HttpTransport, impersonate_available
 
 try:  # pragma: no cover - trivial
@@ -71,6 +76,19 @@ __all__ = [
     "AllEnginesBlocked",
     "HeadlessDriverError",
     "EngineHealth",
+    "SearchResult",
+    "SearchCache",
+    "MemoryCache",
+    "SQLiteCache",
+    "RedisCache",
+    "make_cache",
+    "fetch_markdown",
+    "html_to_markdown",
+    "chunk_markdown",
+    "count_tokens",
+    "MarkdownDocument",
+    "Chunk",
+    "Toolkit",
     "default_health",
     "reset_default_health",
     "ImpersonateTransport",

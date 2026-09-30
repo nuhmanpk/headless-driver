@@ -1,7 +1,12 @@
-# Everything needed to run the full test suite, coverage and a release build.
+# Everything needed to run the full test suite, coverage, the docs site and a
+# release build:
 #   pip install -r requirements-dev.txt && playwright install chromium
 -r requirements.txt
 coverage[toml]>=7.4
+fakeredis>=2.20
 build>=1.0
 twine>=5.0
 trove-classifiers
+mkdocs>=1.6,<2
+mkdocs-material>=9.5
+mkdocstrings[python]>=0.24

@@ -85,6 +85,12 @@ def _window_size(text: str):
     return int(match.group(1)), int(match.group(2))
 
 
+def _err(con: Console) -> Console:
+    """A console on stderr: failures of commands whose stdout is data
+    (``--json``, ``fetch``'s Markdown, the MCP protocol) must not land in it."""
+    return Console(stream=sys.stderr, color=con.color)
+
+
 # ---------------------------------------------------------------- commands
 def cmd_search(args, con: Console) -> int:
     scraper = AdvancedSearchScraper(
@@ -101,6 +107,8 @@ def cmd_search(args, con: Console) -> int:
         deadline=args.deadline,
         aggregate_engines=(args.engines.split(",") if args.engines else None),
         browser=args.browser,
+        pages=args.pages,
+        cache=args.cache,
     )
     try:
         started = time.time()
@@ -118,6 +126,9 @@ def cmd_search(args, con: Console) -> int:
         if args.json:
             json.dump(response.as_dict(), sys.stdout, ensure_ascii=False, indent=2)
             sys.stdout.write("\n")
+            if args.save and not scraper.export(args.save):
+                _err(con).fail(f"could not save {args.save}")
+                return EXIT_FAILED
             return EXIT_OK if results else EXIT_FAILED
 
         if not results:
@@ -370,6 +381,14 @@ def cmd_doctor(args, con: Console) -> int:
            "available (browser='playwright', extract)" if pw_ok
            else f"{pw_why} (optional) - install headless-driver[playwright]", fatal=False)
 
+    try:
+        from .mcp_server import mcp_available
+        mcp_ok, _ = mcp_available()
+    except Exception:  # pragma: no cover
+        mcp_ok = False
+    record(mcp_ok, "mcp server", "available (headless-driver mcp)" if mcp_ok
+           else "not installed (optional) - install headless-driver[mcp]", fatal=False)
+
     for module, label in (("webdriver_manager", "webdriver-manager"),
                           ("selenium_stealth", "selenium-stealth")):
         try:
@@ -487,7 +506,7 @@ def cmd_extract(args, con: Console) -> int:
                     data = browser.extract(args.url, schema, item_selector=args.item,
                                            scroll=args.scroll)
     except Exception as e:
-        con.fail("extract", f"{type(e).__name__}: {e}")
+        _err(con).fail("extract", f"{type(e).__name__}: {e}")
         return EXIT_FAILED
     rows = data if isinstance(data, list) else [data]
     if args.json:
@@ -499,6 +518,52 @@ def cmd_extract(args, con: Console) -> int:
         con.write()
         con.ok(f"{len(rows)} {'row' if len(rows) == 1 else 'rows'}")
     return EXIT_OK if any(any(r.values()) for r in rows) else EXIT_FAILED
+
+
+def cmd_fetch(args, con: Console) -> int:
+    """A page as clean Markdown, for reading or feeding to an LLM."""
+    from .markdown import fetch_markdown
+    try:
+        doc = fetch_markdown(args.url, render=args.render, chunk_tokens=args.chunk,
+                             max_tokens=args.max_tokens, include_images=args.images,
+                             proxy=args.proxy, timeout=args.timeout)
+    except Exception as e:
+        _err(con).fail("fetch", f"{type(e).__name__}: {e}")
+        return EXIT_FAILED
+    if args.json:
+        json.dump(doc.as_dict(), sys.stdout, ensure_ascii=False, indent=2)
+        sys.stdout.write("\n")
+    elif args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(doc.markdown + "\n")
+        con.ok(doc.title or args.url, f"{doc.tokens} tokens via {doc.transport}")
+        con.write(f"     {con.style(os.path.abspath(args.output), 'cyan')}")
+    else:
+        # Markdown goes to stdout as-is, so it pipes cleanly into other tools.
+        sys.stdout.write(doc.markdown + "\n")
+        sys.stderr.write(f"{doc.tokens} tokens via {doc.transport}"
+                         + (f", {len(doc.chunks)} chunks" if doc.chunks else "") + "\n")
+    return EXIT_OK if doc.markdown.strip() else EXIT_FAILED
+
+
+def cmd_mcp(args, con: Console) -> int:
+    """Serve the tools over the Model Context Protocol."""
+    from .mcp_server import serve, claude_desktop_config
+    if args.print_config:
+        json.dump(claude_desktop_config(uvx=args.uvx), sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return EXIT_OK
+    kwargs = {"cache": args.cache or "memory"}
+    if args.proxy:
+        kwargs["proxy"] = args.proxy
+    if args.region:
+        kwargs["region"] = args.region
+    try:
+        serve(args.transport, host=args.host, port=args.port, **kwargs)
+    except RuntimeError as e:
+        _err(con).fail("mcp", str(e))
+        return EXIT_FAILED
+    return EXIT_OK
 
 
 def cmd_shot(args, con: Console) -> int:
@@ -513,9 +578,8 @@ def cmd_pdf(args, con: Console) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="headless-driver",
-        description="Fast multi-engine search scraper (Brave, DuckDuckGo, Yahoo, "
-                    "Mojeek, Google, Bing...) with browser TLS impersonation, "
-                    "plus headless Chrome automation.",
+        description="Web search, page reading and browser automation for Python "
+                    "and AI agents. Free, fast, no API key.",
     )
     parser.add_argument("--version", action="version", version=_version())
     parser.add_argument("--no-color", action="store_true", help="disable coloured output")
@@ -543,6 +607,10 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--region", help="region such as uk-en or us-en")
     search.add_argument("--browser", choices=("selenium", "playwright"), default="selenium",
                         help="browser for engines that need JavaScript")
+    search.add_argument("--pages", type=int, default=1,
+                        help="results pages to fetch from the answering engine(s)")
+    search.add_argument("--cache", metavar="SPEC",
+                        help="cache results: memory, sqlite:///path.db or redis://host/0")
     search.add_argument("--proxy", help="proxy server, e.g. socks5://127.0.0.1:9050")
     search.add_argument("--json", action="store_true", help="print JSON instead")
     search.set_defaults(func=cmd_search)
@@ -576,6 +644,35 @@ def build_parser() -> argparse.ArgumentParser:
     extract.add_argument("--show", action="store_true", help="show the browser window")
     extract.add_argument("--json", action="store_true", help="print JSON instead")
     extract.set_defaults(func=cmd_extract)
+
+    fetch = sub.add_parser("fetch", help="a web page as clean Markdown (for LLMs and RAG)")
+    fetch.add_argument("url", help="page to fetch")
+    fetch.add_argument("-o", "--output", help="write the Markdown to this file")
+    fetch.add_argument("--render", choices=("auto", "never", "always"), default="auto",
+                       help="render JavaScript with Playwright: auto, never or always")
+    fetch.add_argument("--max-tokens", type=int, help="truncate to about this many tokens")
+    fetch.add_argument("--chunk", type=int, metavar="TOKENS",
+                       help="also split into chunks of about this many tokens (see --json)")
+    fetch.add_argument("--images", action="store_true", help="keep images as ![alt](src)")
+    fetch.add_argument("--proxy", help="proxy server")
+    fetch.add_argument("--timeout", type=float, default=15.0, help="fetch timeout")
+    fetch.add_argument("--json", action="store_true",
+                       help="print title, tokens, links and chunks as JSON")
+    fetch.set_defaults(func=cmd_fetch)
+
+    mcp = sub.add_parser("mcp", help="serve search and page tools to AI agents over MCP")
+    mcp.add_argument("--transport", choices=("stdio", "sse", "streamable-http"),
+                     default="stdio", help="stdio for desktop clients, http for remote")
+    mcp.add_argument("--host", default="127.0.0.1", help="bind address for http transports")
+    mcp.add_argument("--port", type=int, default=8000, help="port for http transports")
+    mcp.add_argument("--region", help="default region, e.g. us-en")
+    mcp.add_argument("--proxy", help="proxy for every request")
+    mcp.add_argument("--cache", help="result cache (default: memory)")
+    mcp.add_argument("--print-config", action="store_true",
+                     help="print the JSON to paste into Claude Desktop, Cursor, etc.")
+    mcp.add_argument("--uvx", action="store_true",
+                     help="with --print-config: run through uvx, no install needed")
+    mcp.set_defaults(func=cmd_mcp)
 
     from . import bench as _bench
     bench = sub.add_parser("bench", help="measure which engines answer from this address")
@@ -615,15 +712,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     color = False if (args.no_color or getattr(args, "json", False)) else None
     con = Console(color=color)
     # The library is silent unless asked; the CLI is the caller doing the asking.
-    enable_console_logging(logging.DEBUG if args.verbose else logging.WARNING,
-                           third_party=True, capture_warnings=True,
-                           timestamps=args.verbose)
+    # HEADLESS_DRIVER_LOG, when set, is a more specific request than the default.
+    from .logs import _level_from_env
+    env_level = _level_from_env(os.environ.get("HEADLESS_DRIVER_LOG", ""))
+    level = logging.DEBUG if args.verbose else (env_level or logging.WARNING)
+    enable_console_logging(level, third_party=True, capture_warnings=True,
+                           timestamps=args.verbose or env_level is not None)
     try:
         return args.func(args, con)
     except KeyboardInterrupt:
         con.write()
         con.warn("interrupted")
         return 130
+    except (ValueError, RuntimeError) as e:
+        # A bad combination of options (aggregate + browser, an unknown cache
+        # URL, a missing extra) is a usage problem, not a crash.
+        _err(con).fail(type(e).__name__, str(e))
+        return 2
 
 
 if __name__ == "__main__":

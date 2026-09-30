@@ -1,5 +1,123 @@
 # Changelog
 
+## 1.2.0
+
+The theme of this release is **the web for AI agents**: search results and
+pages in a shape an LLM can use, delivered as the tools and protocol agents
+already speak.
+
+### Added
+
+- **MCP server** — `headless-driver mcp` (`pip install "headless-driver[mcp]"`,
+  Python 3.10+) serves `search`, `search_aggregate`, `fetch_page`, `extract`
+  and `screenshot` to Claude Desktop, Claude Code, Cursor, VS Code and any MCP
+  client, over stdio, SSE or streamable HTTP. Works with MCP SDK 1.x (`FastMCP`)
+  and 2.x (`MCPServer`). `--print-config [--uvx]` prints the client JSON.
+- **`fetch_markdown(url)`** — a page's main content as clean Markdown:
+  navigation, headers, footers, cookie banners, ads, share widgets and
+  permalink anchors removed; code blocks, tables, nested lists and links
+  (absolute) kept. Token counts (exact with `tiktoken`), `max_tokens`
+  truncation, and overlapping `chunks` with heading paths for RAG. `render="auto"`
+  switches to Playwright only for JavaScript app shells. Also
+  `html_to_markdown()`, `chunk_markdown()`, `count_tokens()` and
+  `headless-driver fetch`.
+- **Agent tools** — `Toolkit` defines `web_search`, `fetch_page`,
+  `extract_data` and `screenshot` once and exports them as OpenAI and Anthropic
+  tool definitions (with `handle_openai_tool_calls()` /
+  `handle_anthropic_tool_use()`), LangChain `StructuredTool`s, LlamaIndex
+  `FunctionTool`s and CrewAI `BaseTool`s. Errors are returned to the model, not
+  raised; blocks are explained rather than passed off as "no results".
+- **Result caching** — `cache="memory"`, `"sqlite:///path.db"`,
+  `"redis://…"` or any object with `get`/`set`. Per engine, query, page, limit
+  and region, so both search modes share it and a cached engine answers while
+  cooling down. `ok` for `cache_ttl`, `empty` for `cache_empty_ttl`, refusals
+  never. `response.cached`, `scraper.clear_cache()`.
+- **Pagination** — `search(q, pages=3)` (and `pages=` on the constructor, the
+  CLI's `--pages`, and in aggregate mode), de-duplicated, each result tagged
+  with its `page`; a `page_params` key in engine specs; `scraper.paginates()`.
+- **Typed results** — `response.typed()` returns `SearchResult` dataclasses
+  (with dict-style access for gradual migration), `response.to_pydantic()`
+  pydantic models; `SearchResponse.from_dict()` and `EngineAttempt.from_dict()`.
+- **Documentation site** (MkDocs Material) with guides for search, Markdown,
+  agents, MCP, caching, Playwright and the CLI, the reference manual, and an API
+  reference generated from docstrings; published by `.github/workflows/docs.yml`.
+- Extras: `mcp`, `agents`, `tokens`, `redis`, `docs`; `doctor` reports the MCP server.
+
+### Changed
+
+- **Selenium is no longer pinned to 4.35.0** (`selenium>=4.35,<5`). The exact
+  pin required `typing_extensions~=4.14`, which made the package impossible to
+  install alongside current `mcp`, `anyio` and `pydantic`.
+- `EngineAttempt` gained `page`; `transport="cache"` marks an answer that made
+  no request. `SearchResponse.engines_tried` lists each engine once even when it
+  was asked for several pages.
+- In aggregate mode, each engine's post-processing (circuit breaker,
+  fingerprint rotation, soft-block checks) now runs on the worker thread that
+  fetched it, so rotation replaces the session that was actually refused.
+- New tagline: *Web search for Python and AI agents. Free, fast, no API key.*
+
+### Fixed
+
+Found by a review of the whole package before release, each reproduced first
+and covered by a regression test.
+
+- **CI:** on GitHub Actions (and other CI) colour was switched on for *any*
+  stream, including an `io.StringIO` a caller passed in, so captured output
+  filled with escape codes and two tests failed. CI variables now colour only
+  the process's own stdout and stderr.
+- **Search:** `search_batch(max_workers=N)` ran one query at a time (the
+  browser lock was held for browserless chains too); aggregate mode could
+  drive the one WebDriver from several threads when no browserless transport
+  was installed; `transport="http"`/`"impersonate"` could still start a browser
+  for a JavaScript-only engine; pages 2+ ignored an engine's circuit breaker;
+  an exception while extracting results (or in a `result_processor`) aborted
+  the whole chain instead of falling through; engines cut off because
+  aggregate mode already had consensus were counted as timeouts (refusals);
+  `probe()` returned an attempt whose `page` was a page object, not a number.
+- **URLs:** DuckDuckGo and Google redirect targets were percent-decoded twice
+  (`?q=a%26b` became `?q=a&b`); `tidy_url` decoded `%2F`, `%3B` and non-UTF-8
+  sequences, changing URLs; the worldwide region `wt-wt` sent Google a
+  language called "wt".
+- **Cache:** `MemoryCache` and custom caches handed out their stored objects,
+  so editing a result edited the cache; SQLite expiry could delete an entry
+  another process had just refreshed.
+- **Markdown:** spaces around bold, italic and links were lost (words merged);
+  entities were decoded twice and inline code spaces collapsed; `<br>` breaks
+  and indentation in quoted code were lost; an article could be dropped
+  entirely when a wrapper's class looked like boilerplate or the page was one
+  big `<form>`; an article's own `<header>` (its title) was removed; lists
+  mangled code blocks and nested lists; `<ol start>`, `<base href>` and nested
+  tables were mishandled; `.entry-content` could lose to a comment
+  `<article>`; very deep markup raised `RecursionError`.
+- **Chunking:** chunks could exceed `max_tokens` (separators uncounted, CJK
+  and long-number text never split); oversized code and lists lost their
+  newlines; `# comments` inside code became headings; a heading could be left
+  alone in a chunk; truncation could leave a code fence open; a negative
+  `max_tokens` hung forever (now rejected).
+- **Agents:** MCP clients saw only "Error executing tool" — the real message
+  now reaches them; tools called from MCP's worker threads each launched their
+  own Chromium, never closed (`PlaywrightBrowser(dedicated_thread=True)` now
+  serves them all from one thread); a per-call `region` edited the shared
+  scraper, leaking between concurrent calls (`search(region=...)` is now
+  per call); a tool result with a field named `error` was treated as a
+  failure (failures are now `{"ok": false, "error": ...}`); repeated
+  screenshots of one URL overwrote each other.
+- **Playwright:** a PDF left its context blocking images, so later screenshots
+  had none; pages leaked when navigation failed; `a[href*='@']` was read as an
+  attribute request; IPv6 proxies lost their brackets.
+- **CLI:** `fetch`, `extract` and `mcp` printed failures on stdout (into the
+  Markdown, the JSON, or the MCP stream) — now stderr; `search --json --save`
+  never saved; invalid option combinations crashed with a traceback (now exit
+  2 with a message); `HEADLESS_DRIVER_LOG` was overridden; `bench` with no
+  usable transport passed any `--min-ok-rate`.
+- **Transports:** plain `requests` garbled UTF-8 pages sent without a charset;
+  `Retry-After: inf` stood an engine down forever and broke JSON (non-finite
+  values are ignored, waits capped at a day); rotated impersonation sessions
+  were never released.
+- **Tests:** a test removed `pydantic` from `sys.modules`, breaking later
+  LangChain tests on Python 3.9.
+- **Docs workflow:** a pull request's build could cancel a deploy from `main`.
+
 ## 1.1.0
 
 The theme of this release is **getting answers from the cloud**. On a laptop

@@ -8,28 +8,23 @@ Legend: **P1** next up · **P2** planned · **P3** exploring
 
 ---
 
-## 1.2 — async and agents
+## 1.3 — async and scale
 
 - [ ] **P1 · Async API.** `AsyncSearchScraper` with `await scraper.search(q)`,
       on `curl_cffi`'s `AsyncSession` and Playwright's async API. Aggregate mode
       becomes `asyncio.gather` with a deadline instead of a thread pool, so
-      thousands of concurrent queries cost one event loop.
-- [ ] **P1 · MCP server.** `headless-driver mcp` exposes `search`,
-      `search_aggregate`, `extract`, `screenshot` and `fetch_page` as Model
-      Context Protocol tools, so Claude, Cursor and other agents can search the
-      web and read pages through this package with its block handling intact.
-- [ ] **P1 · LLM-ready page fetch.** `fetch_markdown(url)`: render (HTTP or
-      Playwright), strip navigation and boilerplate, return clean Markdown with
-      links, token-counted and chunked for RAG pipelines.
-- [ ] **P2 · Tool definitions for agent frameworks.** Drop-in tools for
-      LangChain, LlamaIndex, CrewAI, the OpenAI and Anthropic tool formats — one
-      import, no glue code.
-- [ ] **P2 · Result caching.** Optional on-disk / Redis cache keyed by
-      normalised query and engine, with TTLs, so repeated queries in a pipeline
-      never hit an engine twice.
-- [ ] **P2 · Pagination.** `search(q, pages=3)` per engine, deduplicated across pages.
+      thousands of concurrent queries cost one event loop; async tools for MCP.
+- [ ] **P1 · MCP resources and prompts.** Expose recent searches and fetched
+      pages as MCP resources, and "research a topic" / "find a person" prompts.
+- [ ] **P2 · Crawl and site maps.** `crawl(url, max_pages, same_site=True)`
+      yielding `MarkdownDocument`s, with robots.txt respect and sitemap discovery,
+      for building RAG corpora.
+- [ ] **P2 · Semantic re-ranking.** Optional embedding-based re-rank of
+      aggregate results against the query.
+- [ ] **P3 · PDF and Office documents** in `fetch_markdown()` (via `pypdf`,
+      `python-docx`), so search results that are files read as well as pages.
 
-## 1.3 — more browsers, more automation
+## 1.4 — more browsers, more automation
 
 - [ ] **P1 · Puppeteer bridge.** `browser="puppeteer"` via
       `pyppeteer`/a Node sidecar, for teams whose scraping stack is already
@@ -77,16 +72,24 @@ Legend: **P1** next up · **P2** planned · **P3** exploring
 
 ## Developer experience
 
-- [ ] **P1 · Typed result models.** `SearchResult` dataclass / optional
-      Pydantic model alongside the dict, with IDE completion.
 - [ ] **P2 · OpenTelemetry.** Spans per engine attempt with status, HTTP code
       and transport, so blocks show up on existing dashboards.
-- [ ] **P2 · Hosted docs site** (MkDocs Material) with a searchable API reference
-      generated from docstrings.
 - [ ] **P2 · Interactive TUI.** `headless-driver tui`: live engine health,
       circuit-breaker states and a search box.
 - [ ] **P3 · Docker images** published per release: `slim` (browserless), `full`
       (Chrome + Playwright).
+
+## Done in 1.2
+
+- [x] MCP server (`headless-driver mcp`): search, search_aggregate, fetch_page,
+      extract, screenshot; MCP SDK 1.x and 2.x
+- [x] LLM-ready page fetch: `fetch_markdown()` with boilerplate removal, token
+      counts, truncation, chunking and automatic JavaScript rendering
+- [x] Tool definitions for OpenAI, Anthropic, LangChain, LlamaIndex and CrewAI
+- [x] Result caching: memory, SQLite and Redis, with separate TTLs for empty answers
+- [x] Pagination: `search(q, pages=N)`, de-duplicated across pages
+- [x] Typed result models: `SearchResult` dataclass and pydantic models
+- [x] Hosted docs site (MkDocs Material) with an API reference from docstrings
 
 ## Done in 1.1
 

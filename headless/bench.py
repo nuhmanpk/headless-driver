@@ -187,6 +187,15 @@ def main_with_args(args, con=None) -> int:
     if missing and not args.json:
         con.warn("skipping unavailable transports", ", ".join(missing))
     transports = [t for t in transports if available.get(t, False)]
+    if not transports:
+        # Measuring nothing must not pass a --min-ok-rate gate.
+        message = "no requested transport is available: install headless-driver[impersonate]"
+        if args.json:
+            json.dump({"error": message, "cells": [], "failing": []}, sys.stdout)
+            sys.stdout.write("\n")
+        else:
+            con.fail(message)
+        return 1
     queries = list(DEFAULT_QUERIES)
     if args.queries_file:
         with open(args.queries_file, encoding="utf-8") as f:

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "headless-driver"
-version = "1.1.0"
-description = "Fast Python search scraper for Brave, DuckDuckGo, Yahoo, Mojeek, Google and Bing: browser TLS impersonation, multi-engine consensus ranking, block detection and circuit breakers; results in under a second without a browser. Also headless Chrome and Playwright automation, screenshots, PDF and a CLI."
+version = "1.2.0"
+description = "Web search, page reading and browser automation for Python and AI agents. Search Brave, DuckDuckGo, Yahoo, Mojeek, Google and Bing with no API key, read pages as clean Markdown, and give both to agents as OpenAI, Anthropic, LangChain, LlamaIndex or CrewAI tools, or over MCP. Browser TLS impersonation, consensus ranking, honest block detection, caching, Selenium and Playwright."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
@@ -17,7 +17,7 @@ maintainers = [
   { name = "nuhmanpk", email = "nuhmanpk7@gmail.com" }
 ]
 dependencies = [
-  "selenium==4.35.0",
+  "selenium>=4.35,<5",
   "webdriver-manager>=4.0.0",
   "selenium-stealth>=1.0.6",
   "geckodriver-autoinstaller>=0.1.0"
@@ -64,7 +64,10 @@ keywords = [
   "selenium", "playwright", "headless", "headless-browser", "headless-chrome",
   "chromium", "webdriver", "chromedriver", "browser-automation", "automation",
   "screenshot", "pdf-export", "llm", "llm-tools", "ai-agents", "rag",
-  "retrieval-augmented-generation", "agent-tools", "cli",
+  "retrieval-augmented-generation", "agent-tools", "mcp", "mcp-server",
+  "model-context-protocol", "langchain", "llamaindex", "crewai", "openai-tools",
+  "anthropic-tools", "function-calling", "html-to-markdown", "web-to-markdown",
+  "llm-web-search", "ai-search", "cache", "cli",
 ]
 
 [project.optional-dependencies]
@@ -92,13 +95,46 @@ playwright = [
 fast = [
   "lxml>=4.9",
 ]
-# Everything above.
+# `headless-driver mcp`: web search and page reading for Claude, Cursor and
+# other MCP clients. The MCP SDK needs Python 3.10+.
+mcp = [
+  "mcp>=1.2; python_version >= '3.10'",
+  "curl_cffi>=0.7",
+  "beautifulsoup4>=4.12",
+]
+# Toolkit.langchain_tools() and typed pydantic schemas for agent frameworks.
+# LlamaIndex and CrewAI work too; install them yourself (they are large).
+agents = [
+  "langchain-core>=0.2",
+  "pydantic>=2",
+  "curl_cffi>=0.7",
+  "beautifulsoup4>=4.12",
+]
+# Exact token counts in fetch_markdown() (an estimate is used without it).
+tokens = [
+  "tiktoken>=0.5",
+]
+# cache="redis://…": a result cache shared by a fleet.
+redis = [
+  "redis>=5",
+]
+# The documentation site (mkdocs serve).
+docs = [
+  "mkdocs>=1.6,<2",
+  "mkdocs-material>=9.5",
+  "mkdocstrings[python]>=0.24",
+]
+# Everything a program can use at runtime.
 all = [
   "curl_cffi>=0.7",
   "requests>=2.31",
   "beautifulsoup4>=4.12",
   "playwright>=1.40",
   "lxml>=4.9",
+  "mcp>=1.2; python_version >= '3.10'",
+  "pydantic>=2",
+  "tiktoken>=0.5",
+  "redis>=5",
 ]
 # Tooling for tests, coverage and releases, not needed at runtime:
 #   pip install -e ".[dev]"
@@ -111,6 +147,11 @@ dev = [
   "beautifulsoup4>=4.12",
   "curl_cffi>=0.7",
   "playwright>=1.40",
+  "mcp>=1.2; python_version >= '3.10'",
+  "langchain-core>=0.2",
+  "pydantic>=2",
+  "tiktoken>=0.5",
+  "fakeredis>=2.20",
 ]
 
 [project.scripts]
@@ -122,6 +163,7 @@ Documentation = "https://github.com/nuhmanpk/headless-driver/blob/main/DOCS.md"
 Changelog = "https://github.com/nuhmanpk/headless-driver/blob/main/CHANGELOG.md"
 Roadmap = "https://github.com/nuhmanpk/headless-driver/blob/main/TODO.md"
 "LLM docs" = "https://github.com/nuhmanpk/headless-driver/blob/main/llms.txt"
+"Docs site" = "https://nuhmanpk.github.io/headless-driver/"
 Source = "https://github.com/nuhmanpk/headless-driver"
 Issues = "https://github.com/nuhmanpk/headless-driver/issues"
 Funding = "https://github.com/sponsors/nuhmanpk"

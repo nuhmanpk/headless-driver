@@ -18,6 +18,7 @@ Three transports share one tiny document model, so the extraction code in
 * :class:`BrowserTransport` — Selenium, for engines that render in JavaScript.
 """
 
+import math
 import random
 import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -98,9 +99,12 @@ def parse_retry_after(value: Optional[str]) -> Optional[float]:
         return None
     value = str(value).strip()
     try:
-        return max(0.0, float(value))
+        seconds = float(value)
     except ValueError:
-        pass
+        seconds = None
+    if seconds is not None:
+        # "inf" and "nan" parse as floats; neither is a usable wait.
+        return max(0.0, seconds) if math.isfinite(seconds) else None
     try:
         from email.utils import parsedate_to_datetime
         from datetime import datetime, timezone
@@ -266,7 +270,12 @@ class HttpTransport:
             method, url, params=params, data=data, headers=headers, cookies=cookies,
             timeout=self.timeout, allow_redirects=True)
         final_url = str(response.url)
-        return Page(parse_html(response.text, final_url), final_url,
+        # Without a charset in Content-Type, requests assumes ISO-8859-1 for
+        # text/html and garbles UTF-8. Hand over the bytes instead, so the
+        # parser reads the page's own <meta charset>.
+        ctype = (response.headers.get("Content-Type") or "").lower()
+        body = response.text if "charset=" in ctype else response.content
+        return Page(parse_html(body, final_url), final_url,
                     response.status_code, dict(response.headers), self.name)
 
     def rotate(self, key: str = "") -> None:
@@ -369,6 +378,8 @@ class ImpersonateTransport:
         old = sessions.pop(slot, None)
         if old is not None:
             _close_quietly(old[0])
+            with self._lock:   # a closed session must not be kept forever
+                self._all = [s for s in self._all if s is not old[0]]
         if profile:
             # A pinned profile cannot change browser, only its session and cookies.
             return profile

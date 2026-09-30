@@ -1,4 +1,7 @@
+import re
 import csv
+import copy
+import contextlib
 import json
 import html
 import time
@@ -7,7 +10,7 @@ import random
 import secrets
 import threading
 import unicodedata
-from typing import Optional, List, Dict, Callable, Any, Sequence, Set, Tuple
+from typing import Optional, List, Dict, Callable, Any, Sequence, Set, Tuple, Union
 from concurrent.futures import (
     ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED,
 )
@@ -19,11 +22,13 @@ from urllib.parse import (
 from .core import Headless
 from .logs import get_logger, enable_console_logging
 from .health import EngineHealth, default_health
+from .cache import SearchCache, make_cache, cache_key, DEFAULT_TTL, DEFAULT_EMPTY_TTL
 from .results import (
     EngineAttempt, SearchResponse, AllEnginesBlocked,
     STATUS_OK, STATUS_EMPTY, STATUS_BLOCKED, STATUS_RATE_LIMITED, STATUS_UNPARSED,
     STATUS_TIMEOUT, STATUS_UNREACHABLE, STATUS_ERROR, REFUSAL_BY_ENGINE,
     SKIP_COOLING, SKIP_IGNORES_SITE, SKIP_BROWSER_WITHDRAWN, SKIP_DUPLICATE_PROVIDER,
+    SKIP_CONSENSUS,
 )
 from .transport import (
     BrowserTransport, HttpTransport, ImpersonateTransport, http_available,
@@ -47,7 +52,8 @@ def split_region(region: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
         return None, None
     country, _, lang = region.lower().partition("-")
     if country in ("wt", "xa", "xx"):   # "worldwide" in DuckDuckGo's scheme
-        country = None
+        # "wt-wt" names no language either; "xa-ar" (Arabia) does.
+        return None, (lang if lang and lang not in ("wt", "xa", "xx") else None)
     return country or None, lang or "en"
 
 
@@ -118,11 +124,20 @@ def tidy_url(url: str) -> str:
         return url
     if "%" not in parts.path:
         return url
-    path = unquote(parts.path)
-    # Decoding must not change the URL's meaning or make it invalid.
-    if any(ch in path for ch in "?#%") or any(ch.isspace() for ch in path):
+    # Encoded delimiters (%2F, %3B, %3F, %23, %25, ...) mean something different
+    # decoded: "group%2Fproject" is one segment, "group/project" is two.
+    if _ENCODED_RESERVED.search(parts.path):
+        return url
+    try:
+        path = unquote(parts.path, errors="strict")
+    except UnicodeDecodeError:
+        return url   # not UTF-8 (e.g. Latin-1 "caf%E9"): leave it encoded
+    if any(ch.isspace() for ch in path):
         return url
     return urlunparse(parts._replace(path=path))
+
+
+_ENCODED_RESERVED = re.compile(r"%(2[0356CcFf]|3[ABDFabdf]|40|5[BDbd]|2[3-9Aa-b])")
 
 
 #: Query parameters that identify a click, not a page.
@@ -218,6 +233,8 @@ def merge_results(per_engine: Dict[str, List[Dict[str, Any]]],
 # Parsing:  "result", "link", "title", "snippet" (CSS), "unwrap"
 #           (callable(href) -> href), "no_results" (selectors, or "text:..."
 #           substrings, that mark a genuine absence), "block_statuses".
+# Paging:   "page_params" (callable(page) -> dict merged into the request for
+#           pages 2 and up; engines without it return one page).
 # Facts:    "js" (needs a browser), "snippets" (returns description text),
 #           "honors_site" (respects site:), "provider" (whose index it is).
 ENGINE_SPECS: Dict[str, Dict[str, Any]] = {
@@ -233,6 +250,7 @@ ENGINE_SPECS: Dict[str, Dict[str, Any]] = {
         # "Search elsewhere" sits under every real results page, empty or not.
         "no_results": ["#search-elsewhere", "text:Not many great matches",
                        "text:No results found"],
+        "page_params": lambda page: {"offset": str(page - 1)},
         "js": False,
         "snippets": True,
         "honors_site": True,
@@ -250,6 +268,7 @@ ENGINE_SPECS: Dict[str, Dict[str, Any]] = {
         "no_results": [".result--no-result", "div.no-results", "text:No results."],
         # A 202 with an "anomaly" page is DuckDuckGo's way of saying no.
         "block_statuses": [202],
+        "page_params": lambda page: {"s": str(10 + (page - 2) * 15)},
         "js": False,
         "snippets": True,
         "honors_site": True,
@@ -264,6 +283,7 @@ ENGINE_SPECS: Dict[str, Dict[str, Any]] = {
         "snippet": ["td.result-snippet"],
         "no_results": ["text:No results.", "text:No more results"],
         "block_statuses": [202],
+        "page_params": lambda page: {"s": str((page - 1) * 30)},
         "js": False,
         # Verified against the live endpoint: Lite returns titles and URLs but
         # no description text. Callers matching on snippets must know this
@@ -296,6 +316,7 @@ ENGINE_SPECS: Dict[str, Dict[str, Any]] = {
         "snippet": ["div[class*='Text']", "p"],
         "unwrap": unwrap_yahoo,
         "no_results": ["div.zrp", "text:We did not find results"],
+        "page_params": lambda page: {"b": str((page - 1) * 7 + 1)},
         "js": False,
         "snippets": True,
         "honors_site": True,
@@ -316,6 +337,7 @@ ENGINE_SPECS: Dict[str, Dict[str, Any]] = {
         # Server-rendered. What looked like a "results-free stub" served to
         # plain HTTP clients is a JavaScript captcha, i.e. a block, and is
         # detected as one.
+        "page_params": lambda page: {"s": str((page - 1) * 10 + 1)},
         "js": False,
         "snippets": True,
         "honors_site": True,
@@ -334,6 +356,7 @@ ENGINE_SPECS: Dict[str, Dict[str, Any]] = {
         "snippet": ["div[data-sncf]", "div > div:last-child"],
         "unwrap": unwrap_google,
         "no_results": ["text:did not match any documents", "text:No results found for"],
+        "page_params": lambda page: {"start": str((page - 1) * 10)},
         "js": False,
         "snippets": True,
         "honors_site": True,
@@ -352,6 +375,7 @@ ENGINE_SPECS: Dict[str, Dict[str, Any]] = {
         "title": ["h2", "h3", ".w-gl__result-title"],
         "snippet": [".w-gl__description", "p.description", "p"],
         "no_results": ["text:did not match any", "text:No results found"],
+        "page_params": lambda page: {"page": str(page)},
         "js": True,
         "snippets": True,
         "honors_site": True,
@@ -363,6 +387,7 @@ ENGINE_SPECS: Dict[str, Dict[str, Any]] = {
         "link": ["a:has(h3)", "a[href^='http']"],
         "title": ["h3"],
         "snippet": ["div[data-sncf] span", "div[style*='webkit-line-clamp']", "span"],
+        "page_params": lambda page: {"start": str((page - 1) * 10)},
         "js": True,
         "snippets": True,
         "honors_site": True,
@@ -374,6 +399,7 @@ ENGINE_SPECS: Dict[str, Dict[str, Any]] = {
         "link": ["a.OrganicTitle-Link", "h2 a", "a[href^='http']"],
         "title": [".OrganicTitleContentSpan", "h2"],
         "snippet": [".OrganicTextContentSpan", ".TextContainer"],
+        "page_params": lambda page: {"p": str(page - 1)},
         "js": True,
         "snippets": True,
         "honors_site": True,
@@ -386,6 +412,7 @@ ENGINE_SPECS: Dict[str, Dict[str, Any]] = {
         "title": ["h2"],
         "snippet": [".b_caption p", "p[class*='b_lineclamp']", ".b_algoSlug", "p"],
         "no_results": ["li.b_no", "text:There are no results for"],
+        "page_params": lambda page: {"first": str((page - 1) * 10 + 1)},
         "js": False,
         "snippets": True,
         # Honours site:example.com but not site:example.com/path.
@@ -536,6 +563,10 @@ class AdvancedSearchScraper:
         impersonate_profiles: Optional[Sequence[str]] = None,
         browser: str = "selenium",
         playwright_options: Optional[Dict[str, Any]] = None,
+        pages: int = 1,
+        cache: Union[None, bool, str, SearchCache] = None,
+        cache_ttl: float = DEFAULT_TTL,
+        cache_empty_ttl: float = DEFAULT_EMPTY_TTL,
     ):
         self.driver = driver
         self.max_results = max_results
@@ -574,6 +605,14 @@ class AdvancedSearchScraper:
         self.browser = browser
         self.playwright_options = dict(playwright_options or {})
         self._playwright = None
+        if pages < 1:
+            raise ValueError("pages must be at least 1")
+        self.pages = pages
+        # A cache built here from a string is ours to close; one passed in is not.
+        self._owns_cache = isinstance(cache, (str, bool))
+        self.cache: Optional[SearchCache] = make_cache(cache)
+        self.cache_ttl = cache_ttl
+        self.cache_empty_ttl = cache_empty_ttl
 
         if mode not in MODES:
             raise ValueError(f"mode must be 'first' or 'aggregate', not {mode!r}")
@@ -583,6 +622,9 @@ class AdvancedSearchScraper:
         self.min_engines = min_engines
         self.strict_site = strict_site
         self.region = region
+        # A per-call region (search(region=...)) lives here, per thread, so
+        # concurrent searches with different regions never see each other's.
+        self._call_region = threading.local()
         self.normalize_url = normalize or normalize_url
 
         # Refusal tracking is shared process-wide by default, because the
@@ -668,10 +710,10 @@ class AdvancedSearchScraper:
     def _provider(self, engine: str) -> str:
         return self.engines[engine].get("provider") or engine
 
-    def _build_request(self, query: str, engine: str) -> Dict[str, Any]:
+    def _build_request(self, query: str, engine: str, page: int = 1) -> Dict[str, Any]:
         """Method, URL, params/form, headers and cookies for one search."""
         spec = self._spec(engine)
-        region = self.region
+        region = self.effective_region()
 
         def resolve(value):
             return value(region) if callable(value) else dict(value or {})
@@ -688,6 +730,12 @@ class AdvancedSearchScraper:
         else:
             maker = spec.get("params")
             fields = maker(query, region) if maker else {"q": query}
+        if page > 1 and spec.get("page_params"):
+            extra = spec["page_params"](page)
+            if fields is not None:
+                fields = dict(fields, **extra)
+            else:
+                url += ("&" if "?" in url else "?") + urlencode(extra)
         return {
             "method": method,
             "url": url,
@@ -697,9 +745,9 @@ class AdvancedSearchScraper:
             "cookies": resolve(spec.get("cookies")) or None,
         }
 
-    def _engine_url(self, query: str, engine: Optional[str] = None) -> str:
+    def _engine_url(self, query: str, engine: Optional[str] = None, page: int = 1) -> str:
         """The engine's results URL as a single GET (what a browser loads)."""
-        request = self._build_request(query, engine or self.search_engine)
+        request = self._build_request(query, engine or self.search_engine, page)
         fields = request["params"] or request["data"]
         if not fields:
             return request["url"]
@@ -730,6 +778,9 @@ class AdvancedSearchScraper:
 
     def _skip_reason(self, engine: str, query: str, explicit: bool) -> Optional[Dict[str, Any]]:
         """Why `engine` should not be asked right now, if it should not."""
+        if self.transport in BROWSERLESS_TRANSPORTS and self._needs_browser(engine):
+            # transport="http"/"impersonate" promises never to start a browser.
+            return {"engine": engine, "reason": "needs_browser", "resume_in": 0}
         if (self.strict_site and not explicit and self._site_constraints(query)
                 and self.engines[engine].get("honors_site") is False):
             return {"engine": engine, "reason": SKIP_IGNORES_SITE, "resume_in": 0}
@@ -819,12 +870,12 @@ class AdvancedSearchScraper:
 
         # DuckDuckGo: /l/?uddg=<percent-encoded target>
         if "duckduckgo.com" in host and parts.path.startswith("/l/"):
-            target = unquote(params.get("uddg", [""])[0])
+            target = params.get("uddg", [""])[0]
             if target.startswith(("http://", "https://")):
                 return target
         # Google: /url?q=<percent-encoded target>
         if "google." in host and parts.path in ("/url", "/imgres"):
-            target = unquote(params.get("q", params.get("url", [""]))[0])
+            target = params.get("q", params.get("url", [""]))[0]
             if target.startswith(("http://", "https://")):
                 return target
         # Yahoo: r.search.yahoo.com/…/RU=<target>/RK=…
@@ -1105,8 +1156,12 @@ class AdvancedSearchScraper:
             return STATUS_ERROR, f"HTTP {status}"
         return None
 
-    def _search_one(self, engine: str, query: str, limit: int) -> tuple:
-        """Scrape one engine. Returns (results, EngineAttempt)."""
+    def paginates(self, engine: str) -> bool:
+        """Whether `engine` can be asked for pages beyond the first."""
+        return bool(self.engines[engine].get("page_params"))
+
+    def _search_one(self, engine: str, query: str, limit: int, page: int = 1) -> tuple:
+        """Scrape one page of one engine. Returns (results, EngineAttempt)."""
         spec = self._spec(engine)
         started = time.time()
         meta: Dict[str, Any] = {"transport": ""}
@@ -1115,7 +1170,7 @@ class AdvancedSearchScraper:
             return EngineAttempt(engine=engine, status=status, count=count,
                                  reason=reason, elapsed=time.time() - started,
                                  http_status=http_status, retry_after=retry_after,
-                                 transport=str(meta["transport"]))
+                                 transport=str(meta["transport"]), page=page)
 
         try:
             transport, is_browser = self._transport_for(engine)
@@ -1127,25 +1182,26 @@ class AdvancedSearchScraper:
 
         try:
             if is_browser:
-                url = self._engine_url(query, engine)
+                url = self._engine_url(query, engine, page)
                 log.debug("%s: %s (%s)", engine, url, meta["transport"])
                 if meta["transport"] == "playwright":
                     # One context per engine: cookies never cross engines.
-                    page = transport.fetch(url, spec["result"], key=engine)
+                    fetched = transport.fetch(url, spec["result"], key=engine)
                 else:
-                    page = transport.fetch(url, spec["result"])
+                    fetched = transport.fetch(url, spec["result"])
             else:
-                request = self._build_request(query, engine)
+                request = self._build_request(query, engine, page)
                 profile = spec.get("impersonate")
                 if spec.get("prepare"):
                     def fetch(url, **kw):
                         return transport.fetch(url, key=engine, profile=profile, **kw)
-                    spec["prepare"]({"engine": engine, "query": query, "region": self.region,
+                    spec["prepare"]({"engine": engine, "query": query,
+                                     "region": self.effective_region(),
                                      "request": request, "fetch": fetch, "scraper": self,
                                      "spec": spec})
                 log.debug("%s: %s %s (%s)", engine, request["method"], request["url"],
                           meta["transport"])
-                page = transport.fetch(request.pop("url"), key=engine, profile=profile,
+                fetched = transport.fetch(request.pop("url"), key=engine, profile=profile,
                                        **request)
         except Exception as e:
             kind = type(e).__name__
@@ -1168,31 +1224,31 @@ class AdvancedSearchScraper:
 
         # Selenium cannot see HTTP status codes; Playwright and the HTTP clients can.
         http_status = (None if meta["transport"] == "browser"
-                       else getattr(page, "status", None))
-        verdict = self._classify_status(engine, page)
+                       else getattr(fetched, "status", None))
+        verdict = self._classify_status(engine, fetched)
         if verdict:
             status, reason = verdict
-            retry_after = getattr(page, "retry_after", None) if status == STATUS_RATE_LIMITED else None
+            retry_after = getattr(fetched, "retry_after", None) if status == STATUS_RATE_LIMITED else None
             log.debug("%s refused: %s", engine, reason)
             return [], attempt(status, reason=reason, http_status=http_status,
                                retry_after=retry_after)
 
-        reason = self._blocked_reason(page)
+        reason = self._blocked_reason(fetched)
         if reason:
             log.debug("%s served a %s", engine, reason)
             return [], attempt(STATUS_BLOCKED, reason=reason, http_status=http_status)
 
-        nodes = page.select(spec["result"])
+        nodes = fetched.select(spec["result"])
         if not nodes:
             # No result containers at all: a refusal, a real "no results"
             # page, or markup we no longer recognise. Only the second one is
             # evidence that nothing exists.
-            reason = self._soft_block_reason(page)
+            reason = self._soft_block_reason(fetched)
             if reason:
                 log.debug("%s served a %s", engine, reason)
                 return [], attempt(STATUS_BLOCKED, reason=reason, http_status=http_status)
             markers = spec.get("no_results")
-            if markers and not self._looks_empty(page, markers):
+            if markers and not self._looks_empty(fetched, markers):
                 log.debug("%s returned a page with no results and no "
                           "'no results' marker", engine)
                 return [], attempt(STATUS_UNPARSED, http_status=http_status,
@@ -1204,17 +1260,24 @@ class AdvancedSearchScraper:
         extracted: List[Dict] = []
         seen = set()
         dropped_offsite = 0
-        for node in nodes:
-            if len(extracted) >= limit:
-                break
-            item = self._extract_result(node, engine)
-            if not item["url"] or not item["title"] or item["url"] in seen:
-                continue
-            if constraints and not self._matches_site(item["url"], constraints):
-                dropped_offsite += 1
-                continue
-            seen.add(item["url"])
-            extracted.append(self.result_processor(query, item))
+        try:
+            for node in nodes:
+                if len(extracted) >= limit:
+                    break
+                item = self._extract_result(node, engine)
+                if not item["url"] or not item["title"] or item["url"] in seen:
+                    continue
+                if constraints and not self._matches_site(item["url"], constraints):
+                    dropped_offsite += 1
+                    continue
+                seen.add(item["url"])
+                extracted.append(self.result_processor(query, item))
+        except Exception as e:
+            # A broken selector, odd markup or a failing result_processor
+            # must cost this engine, not the whole search.
+            log.warning("%s: extracting results failed: %s: %s", engine, type(e).__name__, e)
+            return [], attempt(STATUS_ERROR, http_status=http_status,
+                               reason=f"extraction failed: {type(e).__name__}: {e}")
 
         if not extracted and dropped_offsite:
             log.debug("%s ignored the site: operator (%s off-target results)",
@@ -1223,6 +1286,119 @@ class AdvancedSearchScraper:
             log.debug("%s returned no usable results for: %s", engine, query)
             return [], attempt(STATUS_EMPTY, http_status=http_status)
         return extracted, attempt(STATUS_OK, count=len(extracted), http_status=http_status)
+
+    # ---------------------------------------------------------- cache/pages
+    def _cache_key(self, engine: str, query: str, limit: int, page: int) -> str:
+        return cache_key(engine, query, limit, page, self.effective_region())
+
+    _NO_REGION = object()
+
+    def effective_region(self) -> Optional[str]:
+        """The region for the search running on this thread."""
+        value = getattr(self._call_region, "value", self._NO_REGION)
+        return self.region if value is self._NO_REGION else value
+
+    @contextlib.contextmanager
+    def _region_scope(self, region):
+        if region is None:
+            yield
+            return
+        previous = getattr(self._call_region, "value", self._NO_REGION)
+        self._call_region.value = region
+        try:
+            yield
+        finally:
+            if previous is self._NO_REGION:
+                del self._call_region.value
+            else:
+                self._call_region.value = previous
+
+    def _in_region(self, region, fn, *args):
+        """Run `fn` on a worker thread under the caller's region."""
+        with self._region_scope(region):
+            return fn(*args)
+
+    def _cached(self, engine: str, query: str, limit: int, page: int = 1):
+        """A cached ``(results, attempt)`` for one engine page, or None."""
+        if self.cache is None:
+            return None
+        try:
+            hit = self.cache.get(self._cache_key(engine, query, limit, page))
+        except Exception as e:
+            log.warning("cache read failed: %s", e)
+            return None
+        if not hit:
+            return None
+        # A deep copy: a caller editing its results must not edit a cache that
+        # hands out its stored objects (any get/set object is allowed).
+        results = copy.deepcopy(list(hit.get("results") or []))
+        attempt = EngineAttempt(engine, hit.get("status", STATUS_OK), count=len(results),
+                                transport="cache", page=page, reason="cached")
+        return results, attempt
+
+    def _store(self, engine: str, query: str, limit: int, page: int,
+               results: List[Dict], attempt: EngineAttempt) -> None:
+        if self.cache is None or attempt.status not in (STATUS_OK, STATUS_EMPTY):
+            return
+        ttl = self.cache_ttl if attempt.status == STATUS_OK else self.cache_empty_ttl
+        if ttl <= 0:
+            return
+        try:
+            self.cache.set(self._cache_key(engine, query, limit, page),
+                           {"status": attempt.status, "results": results}, ttl)
+        except (TypeError, ValueError) as e:
+            # A result_processor returned something JSON cannot hold.
+            log.debug("not caching %s: %s", engine, e)
+        except Exception as e:
+            log.warning("cache write failed: %s", e)
+
+    def _collect(self, engine: str, query: str, limit: int, pages: int,
+                 refused_providers: Set[str]) -> Tuple[List[Dict], List[EngineAttempt]]:
+        """Every page of one engine, through the cache: ``(results, attempts)``.
+
+        Stops at the first page that is refused, empty, or adds nothing new.
+        With ``pages > 1`` each result is tagged with the ``page`` it came from.
+        """
+        collected: List[Dict] = []
+        attempts: List[EngineAttempt] = []
+        seen: Set[str] = set()
+        for page in range(1, pages + 1):
+            if page > 1 and not self.paginates(engine):
+                break
+            hit = self._cached(engine, query, limit, page)
+            if hit is None and page > 1:
+                # Page 1 may have come from the cache; a live request for a
+                # later page must still respect a cooling engine.
+                skip = self._skip_reason(engine, query, explicit=True)
+                if skip:
+                    log.debug("not paging %s further (%s)", engine, skip["reason"])
+                    break
+            if hit is not None:
+                results, attempt = hit
+            else:
+                if page == 1:
+                    results, attempt = self._search_one(engine, query, limit)
+                else:
+                    results, attempt = self._search_one(engine, query, limit, page=page)
+                attempt.page = page
+                attempt = self._settle(attempt, refused_providers)
+                self._store(engine, query, limit, page, results, attempt)
+            attempts.append(attempt)
+            if not (attempt.ok and results):
+                break
+            fresh = [r for r in results if r.get("url") not in seen]
+            if not fresh:
+                break
+            for item in fresh:
+                seen.add(item.get("url"))
+                if pages > 1:
+                    item = dict(item, page=page)
+                collected.append(item)
+        return collected, attempts
+
+    def clear_cache(self) -> None:
+        if self.cache is not None:
+            self.cache.clear()
 
     def _settle(self, attempt: EngineAttempt, refused_providers: Set[str]) -> EngineAttempt:
         """Everything that follows an attempt: soft-block checks, the circuit
@@ -1302,6 +1478,8 @@ class AdvancedSearchScraper:
         engines: Optional[Sequence[str]] = None,
         deadline: Optional[float] = None,
         min_engines: Optional[int] = None,
+        pages: Optional[int] = None,
+        region: Optional[str] = None,
     ) -> SearchResponse:
         """Search `query`.
 
@@ -1314,16 +1492,28 @@ class AdvancedSearchScraper:
         answered, what every other engine did, and which were skipped.
 
         `engine` starts the chain somewhere else; `fallback` overrides whether
-        the rest of the chain is tried at all.
+        the rest of the chain is tried at all. `pages` fetches up to that many
+        results pages from each engine that answers, each up to `max_results`,
+        de-duplicated. `region` overrides the scraper's region for this call
+        only, safely under concurrency.
         """
+        with self._region_scope(region):
+            return self._search(query, max_results, engine, fallback, mode, engines,
+                                deadline, min_engines, pages)
+
+    def _search(self, query, max_results, engine, fallback, mode, engines, deadline,
+                min_engines, pages) -> SearchResponse:
         mode = mode or self.mode
+        pages = self.pages if pages is None else pages
+        if pages < 1:
+            raise ValueError("pages must be at least 1")
         if mode not in MODES:
             raise ValueError(f"mode must be 'first' or 'aggregate', not {mode!r}")
         limit = self.max_results if max_results is None else max_results
         if mode == "aggregate":
             return self._search_aggregate(
                 query, limit, engines, self.deadline if deadline is None else deadline,
-                self.min_engines if min_engines is None else min_engines)
+                self.min_engines if min_engines is None else min_engines, pages)
 
         started = time.time()
         response = SearchResponse(query=query)
@@ -1337,17 +1527,21 @@ class AdvancedSearchScraper:
         self.last_engine = None
         refused_providers: Set[str] = set()
 
-        with self._lock:
+        # Only a WebDriver session needs serialising; browserless chains run
+        # concurrently (search_batch relies on it).
+        guard = self._lock if self._chain_needs_browser(order) else contextlib.nullcontext()
+        with guard:
             for index, name in enumerate(order):
-                skip = self._skip_reason(name, query, explicit=(index == 0 and len(order) == 1))
+                # A cached answer needs no request, so no reason to skip it.
+                skip = None if self._cached(name, query, limit) else self._skip_reason(
+                    name, query, explicit=(index == 0 and len(order) == 1))
                 if skip:
                     log.debug("skipping %s (%s)", name, skip["reason"])
                     response.skipped.append(skip)
                     continue
-                results, attempt = self._search_one(name, query, limit)
-                attempt = self._settle(attempt, refused_providers)
-                response.attempts.append(attempt)
-                if results and attempt.ok:
+                results, attempts = self._collect(name, query, limit, pages, refused_providers)
+                response.attempts.extend(attempts)
+                if results and attempts[0].ok:
                     response.results = results
                     response.engine = name
                     response.engines = [name]
@@ -1357,6 +1551,12 @@ class AdvancedSearchScraper:
                     break
 
         return self._finish(response, started, order)
+
+    def _chain_needs_browser(self, order: Sequence[str]) -> bool:
+        if self.transport == "browser" or self.browserless_transport_name() is None:
+            return True
+        return any(self._needs_browser(n) for n in order
+                   if not (self.transport in BROWSERLESS_TRANSPORTS))
 
     def _remember(self, results: List[Dict]) -> None:
         if self.keep_history:
@@ -1389,11 +1589,12 @@ class AdvancedSearchScraper:
     # ------------------------------------------------------------ aggregate
     def _search_aggregate(self, query: str, limit: int,
                           engines: Optional[Sequence[str]], deadline: float,
-                          min_engines: int) -> SearchResponse:
+                          min_engines: int, pages: int = 1) -> SearchResponse:
         """Ask one engine per independent index at once; rank by agreement."""
-        if self.transport == "browser":
-            raise ValueError('mode="aggregate" needs a browserless transport; '
-                             'a WebDriver session cannot be shared across threads')
+        if self.transport == "browser" or self.browserless_transport_name() is None:
+            raise ValueError('mode="aggregate" needs a browserless transport (install '
+                             'headless-driver[impersonate]); a WebDriver session cannot '
+                             'be shared across threads')
         started = time.time()
         response = SearchResponse(query=query, mode="aggregate")
         if limit <= 0:
@@ -1410,7 +1611,8 @@ class AdvancedSearchScraper:
                 response.skipped.append({"engine": name, "reason": "needs_browser",
                                          "resume_in": 0})
                 continue
-            skip = self._skip_reason(name, query, explicit=False)
+            skip = None if self._cached(name, query, limit) else self._skip_reason(
+                name, query, explicit=False)
             if skip:
                 response.skipped.append(skip)
                 continue
@@ -1427,7 +1629,10 @@ class AdvancedSearchScraper:
                 queue = groups[provider]
                 if queue:
                     name = queue.pop(0)
-                    pending[executor.submit(self._search_one, name, query, limit)] = (provider, name)
+                    future = executor.submit(self._in_region, self.effective_region(),
+                                             self._collect, name, query, limit, pages,
+                                             refused_providers)
+                    pending[future] = (provider, name)
 
             for provider in list(groups):
                 submit(provider)
@@ -1441,12 +1646,12 @@ class AdvancedSearchScraper:
                     for future in done:
                         provider, name = pending.pop(future)
                         try:
-                            results, attempt = future.result()
+                            results, attempts = future.result()
                         except Exception as e:  # pragma: no cover - defensive
-                            results, attempt = [], EngineAttempt(name, STATUS_ERROR,
-                                                                 reason=str(e))
-                        attempt = self._settle(attempt, refused_providers)
-                        response.attempts.append(attempt)
+                            results, attempts = [], [EngineAttempt(name, STATUS_ERROR,
+                                                                   reason=str(e))]
+                        response.attempts.extend(attempts)
+                        attempt = attempts[0]
                         if attempt.ok and results:
                             per_engine[name] = results
                         elif attempt.blocked and time.time() - started < deadline:
@@ -1455,18 +1660,23 @@ class AdvancedSearchScraper:
                         log.debug("aggregate: consensus after %s engines", len(per_engine))
                         break
             finally:
+                timed_out = time.time() - started >= deadline
                 for future, (provider, name) in pending.items():
-                    response.attempts.append(EngineAttempt(
-                        name, STATUS_TIMEOUT, reason=f"not back within the {deadline:g}s deadline"
-                        if time.time() - started >= deadline else "stopped early: consensus reached",
-                        elapsed=time.time() - started))
+                    if timed_out:
+                        response.attempts.append(EngineAttempt(
+                            name, STATUS_TIMEOUT, elapsed=time.time() - started,
+                            reason=f"not back within the {deadline:g}s deadline"))
+                    else:
+                        # Not a refusal: the answer was no longer needed.
+                        response.skipped.append({"engine": name, "resume_in": 0,
+                                                 "reason": SKIP_CONSENSUS})
                 executor.shutdown(wait=False, cancel_futures=True)
             for provider, queue in groups.items():
                 for name in queue:
                     response.skipped.append({"engine": name, "resume_in": 0,
                                              "reason": SKIP_DUPLICATE_PROVIDER})
 
-        merged = merge_results(per_engine, names, self.normalize_url)[:limit]
+        merged = merge_results(per_engine, names, self.normalize_url)[:limit * pages]
         response.results = merged
         response.engines = [n for n in names if n in per_engine]
         response.engine = "aggregate" if merged else None
@@ -1597,6 +1807,8 @@ class AdvancedSearchScraper:
         for transport in (http, impersonate, playwright):
             if transport is not None:
                 transport.close()
+        if self._owns_cache and self.cache is not None:
+            self.cache.close()
 
     def __enter__(self) -> "AdvancedSearchScraper":
         return self

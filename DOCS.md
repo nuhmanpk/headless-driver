@@ -1,7 +1,9 @@
 # headless-driver documentation
 
 Complete reference for the Python API and the `headless-driver` command line
-tool. For a quick tour, see the [README](README.md).
+tool. For a quick tour, see the [README](README.md); for guides and an API
+reference generated from the code, the
+[documentation site](https://nuhmanpk.github.io/headless-driver/).
 
 - [Install](#install)
 - [Command line](#command-line)
@@ -9,6 +11,8 @@ tool. For a quick tour, see the [README](README.md).
   - [engines](#engines)
   - [doctor](#doctor)
   - [bench](#bench)
+  - [fetch](#fetch)
+  - [mcp](#mcp)
   - [extract](#extract)
   - [shot and pdf](#shot-and-pdf)
   - [Colour, piping and exit codes](#colour-piping-and-exit-codes)
@@ -25,6 +29,11 @@ tool. For a quick tour, see the [README](README.md).
 - [Aggregate mode](#aggregate-mode)
 - [Circuit breaker](#circuit-breaker)
 - [Playwright](#playwright)
+- [Reading pages as Markdown](#reading-pages-as-markdown)
+- [AI agents and tools](#ai-agents-and-tools)
+- [MCP server](#mcp-server)
+- [Caching and pagination](#caching-and-pagination)
+- [Typed results](#typed-results)
 - [Parallel searching](#parallel-searching)
 - [Search engines](#search-engines)
 - [Timeouts](#timeouts)
@@ -42,7 +51,12 @@ pip install "headless-driver[impersonate]"   # recommended
 pip install "headless-driver[http]"          # plain-requests browserless mode
 pip install "headless-driver[playwright]"    # Playwright backend; then: playwright install chromium
 pip install "headless-driver[fast]"          # lxml parser
-pip install "headless-driver[all]"           # all of the above
+pip install "headless-driver[mcp]"           # MCP server for AI agents (Python 3.10+)
+pip install "headless-driver[agents]"        # LangChain tools, pydantic schemas
+pip install "headless-driver[tokens]"        # exact token counts (tiktoken)
+pip install "headless-driver[redis]"         # Redis result cache
+pip install "headless-driver[docs]"          # build the documentation site
+pip install "headless-driver[all]"           # everything a program can use
 pip install headless-driver                  # Selenium only
 ```
 
@@ -89,6 +103,8 @@ not `headless-driver search "x" -v`.
 | `engines` | List the engines and the fallback order |
 | `doctor` | Check Chrome, ChromeDriver, transports and connectivity |
 | `bench` | Measure which engines answer from this address |
+| `fetch URL` | A page as clean Markdown, for reading or feeding to an LLM |
+| `mcp` | Serve search and page tools to AI agents over MCP |
 | `extract URL` | Pull structured data out of a page (Playwright) |
 | `shot URL` | Save a screenshot |
 | `pdf URL` | Save the page as PDF |
@@ -117,6 +133,8 @@ headless-driver search 'site:linkedin.com/in "jane doe"' --mode aggregate --regi
 | `--transport` | `auto` | `auto`, `impersonate`, `http` or `browser` |
 | `--browser` | `selenium` | `selenium` or `playwright`, for engines that need JavaScript |
 | `--proxy` | – | Proxy server URL |
+| `--pages` | `1` | Results pages to fetch from each answering engine |
+| `--cache SPEC` | – | `memory`, `sqlite:///path.db` or `redis://host:port/db` |
 | `--save PATH` | – | Also write results to `.json` or `.csv` |
 | `--timeout` | `20.0` | Page load timeout in seconds |
 | `--json` | off | Print JSON instead of formatted output |
@@ -232,6 +250,46 @@ to see what your servers see.
 | `--min-ok-rate` | `0` | Exit 1 when any cell falls below this |
 | `--json` | off | Print JSON instead |
 
+### fetch
+
+```bash
+headless-driver fetch https://docs.python.org/3/library/asyncio.html > asyncio.md
+headless-driver fetch https://example.com --max-tokens 2000 -o page.md
+headless-driver fetch https://example.com --chunk 500 --json | jq '.chunks[].heading'
+headless-driver fetch https://spa.example.com --render always
+```
+
+Prints the page's main content as Markdown on stdout (the token count and
+transport go to stderr). See [Reading pages as Markdown](#reading-pages-as-markdown).
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `-o`, `--output` | stdout | Write the Markdown to a file |
+| `--render` | `auto` | `auto`, `never` or `always` render JavaScript with Playwright |
+| `--max-tokens N` | – | Truncate at a paragraph boundary |
+| `--chunk N` | – | Also split into chunks of about N tokens (shown with `--json`) |
+| `--images` | off | Keep images as `![alt](src)` |
+| `--proxy`, `--timeout` | –, `15` | As usual |
+| `--json` | off | Title, status, tokens, links, chunks and Markdown as JSON |
+
+### mcp
+
+```bash
+headless-driver mcp                                   # stdio, for desktop clients
+headless-driver mcp --transport streamable-http --port 8000
+headless-driver mcp --print-config [--uvx]            # the JSON to paste into a client
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--transport` | `stdio` | `stdio`, `sse` or `streamable-http` |
+| `--host`, `--port` | `127.0.0.1`, `8000` | Bind address for the HTTP transports |
+| `--region`, `--proxy` | – | Applied to every tool call |
+| `--cache` | `memory` | Result cache |
+| `--print-config` | off | Print an `mcpServers` entry and exit; `--uvx` runs it through uvx |
+
+See [MCP server](#mcp-server).
+
 ### extract
 
 ```bash
@@ -321,11 +379,15 @@ from headless import (
     EngineHealth, default_health, reset_default_health,
     ImpersonateTransport, HttpTransport,
     merge_results, normalize_url, normalize_text,
+    SearchResult, Toolkit,
+    fetch_markdown, html_to_markdown, chunk_markdown, count_tokens, MarkdownDocument, Chunk,
+    SearchCache, MemoryCache, SQLiteCache, RedisCache, make_cache,
     ColorFormatter, colorize_logging, enable_console_logging,
     find_chrome_binary, find_chromedriver_path, install_chromedriver,
     ENGINE_SPECS, DEFAULT_ENGINE, DEFAULT_FALLBACK_ENGINES, DEFAULT_AGGREGATE_ENGINES,
 )
 from headless.playwright_driver import PlaywrightBrowser, PlaywrightTransport
+from headless.mcp_server import build_server, serve
 ```
 
 ### Headless
@@ -531,6 +593,10 @@ AdvancedSearchScraper(
     impersonate_profiles: Optional[Sequence[str]] = None,
     browser: str = "selenium",           # or "playwright"
     playwright_options: Optional[dict] = None,
+    pages: int = 1,
+    cache=None,                          # None | "memory" | "sqlite:///p.db" | "redis://…" | object
+    cache_ttl: float = 86400.0,
+    cache_empty_ttl: float = 3600.0,
 )
 ```
 
@@ -560,6 +626,8 @@ AdvancedSearchScraper(
 | `normalize` | URL-normalisation hook used to merge results in aggregate mode. |
 | `impersonate_profiles` | Browser profiles to rotate between (default Chrome, Edge, Safari, Firefox, Chrome Android, Safari iOS). |
 | `browser`, `playwright_options` | Which browser serves JavaScript engines, and options for [PlaywrightBrowser](#playwright). |
+| `pages` | Default results pages per engine; see [Caching and pagination](#caching-and-pagination). |
+| `cache`, `cache_ttl`, `cache_empty_ttl` | Result cache and how long `ok` and `empty` answers are kept. |
 
 **Attributes**
 
@@ -574,7 +642,9 @@ AdvancedSearchScraper(
 
 | Method | Returns | Notes |
 | --- | --- | --- |
-| `search(query, max_results=None, engine=None, fallback=None, mode=None, engines=None, deadline=None, min_engines=None)` | `SearchResponse` | Walks the chain, or fans out with `mode="aggregate"`. `engine` chooses where to start; `fallback` decides whether the rest is tried. |
+| `search(query, max_results=None, engine=None, fallback=None, mode=None, engines=None, deadline=None, min_engines=None, pages=None)` | `SearchResponse` | Walks the chain, or fans out with `mode="aggregate"`. `engine` chooses where to start; `fallback` decides whether the rest is tried; `pages` paginates. |
+| `paginates(engine)` | `bool` | Whether the engine can return pages beyond the first. |
+| `clear_cache()` | `None` | Empty the result cache. |
 | `probe(engine=None, query=None)` | `EngineAttempt` | Ask one engine a query that cannot be empty; `empty` means soft-blocked. |
 | `health()` | `Dict` | Circuit-breaker state per engine: `state`, `resume_in`, `last_status`, `http_status`. |
 | `reset_health(engine=None)` | `None` | Stand every engine (or one) back up now. |
@@ -836,7 +906,9 @@ elif not response:
 | `elapsed` | Seconds |
 | `http_status` | The HTTP status code, when the page came over HTTP or Playwright (Selenium cannot see it) |
 | `retry_after` | Seconds from a `Retry-After` header on a 429 |
-| `transport` | `impersonate`, `http`, `browser` or `playwright` |
+| `transport` | `impersonate`, `http`, `browser`, `playwright`, or `cache` when no request was made |
+| `page` | Which results page this attempt fetched |
+| `cached` | `transport == "cache"` |
 | `blocked` | True for every status except `ok` and `empty` |
 
 `str(attempt)` reads `mojeek: blocked (HTTP 403)`.
@@ -878,6 +950,9 @@ that genuinely had nothing makes the search an honest empty result.
 | `cooling` | True when nobody was asked because every eligible engine is standing down — "we chose not to ask", as opposed to `blocked`, "they refused us" |
 | `rate_limited`, `retry_after` | Whether any engine sent 429, and the longest wait any asked for |
 | `answered` | Attempts that were `ok` or `empty` |
+| `cached` | True when every answer came from the cache and no request was made |
+| `typed()`, `to_pydantic()` | The results as dataclasses or pydantic models; see [Typed results](#typed-results) |
+| `SearchResponse.from_dict(d)` | Rebuild a response from `as_dict()` output |
 
 ```python
 response = scraper.search(query)
@@ -1147,6 +1222,181 @@ Playwright driver, shared by every `PlaywrightBrowser` on that thread.
 
 ---
 
+## Reading pages as Markdown
+
+```python
+from headless import fetch_markdown
+
+doc = fetch_markdown(url, render="auto", chunk_tokens=500, overlap=50, max_tokens=None,
+                     main_content=True, include_links=True, include_images=False,
+                     timeout=15.0, proxy=None)
+```
+
+Fetches `url` over the impersonating transport (or plain `http`), finds the
+main content — `<main>`, `<article>`, `[role=main]`, common content
+containers, or else the block with the most prose and the fewest links — and
+removes navigation, headers, footers, sidebars, cookie and consent banners,
+ads, share widgets, newsletter prompts, hidden elements and heading permalink
+anchors. What remains becomes Markdown: headings, paragraphs, bold and italic,
+inline code, fenced code blocks (with their language), nested lists, tables,
+block quotes, definition lists, and links made absolute. Text is cleaned the
+same way search results are.
+
+| Argument | Meaning |
+| --- | --- |
+| `render` | `"auto"`: HTTP first, Playwright only if the page is a short app shell (empty `#root`/`#app`/`#__next`, "enable JavaScript", mostly scripts). `"never"` or `"always"` to force. |
+| `chunk_tokens`, `overlap` | Also split into `Chunk`s of at most `chunk_tokens`, with `overlap` tokens repeated |
+| `max_tokens` | Truncate at a paragraph boundary to fit a context window |
+| `main_content` | `False` converts the whole `<body>` |
+| `include_links`, `include_images` | Keep links as `[text](url)`; images as `![alt](src)` |
+
+`MarkdownDocument` fields: `url`, `final_url`, `status`, `title`, `markdown`,
+`tokens`, `links` (`(text, url)` pairs), `chunks`, `transport`; `as_dict()`
+for JSON. `Chunk` fields: `index`, `text`, `tokens`, `heading` (the heading
+path, e.g. `"Install > From source"`).
+
+Token counts are exact with `tiktoken` (`[tokens]` extra, `cl100k_base`) and
+estimated otherwise (within about ten percent for English prose).
+
+Lower-level pieces:
+
+```python
+from headless import html_to_markdown, chunk_markdown, count_tokens
+markdown, title, links = html_to_markdown(html, base_url="https://example.com/")
+chunks = chunk_markdown(markdown, max_tokens=300, overlap=30)
+```
+
+---
+
+## AI agents and tools
+
+`Toolkit` defines four tools once and exports them in every common format:
+
+| Tool | Arguments | Returns |
+| --- | --- | --- |
+| `web_search` | `query`, `max_results` (≤30), `mode` (`first`/`aggregate`), `region`, `pages` (≤5) | `results` (`title`, `url`, `snippet`, and `votes`/`engines` in aggregate mode), `engine`, `blocked`, a `note` when blocked, cooling or empty, `cached` |
+| `fetch_page` | `url`, `max_tokens` (4000), `render` | `url`, `title`, `status`, `tokens`, `markdown` |
+| `extract_data` | `url`, `fields` (name → CSS[@attr]), `item_selector`, `scroll` | A record or a list of records (Playwright) |
+| `screenshot` | `url`, `full_page` | `path`, `bytes` (Playwright) |
+
+```python
+from headless import Toolkit
+
+toolkit = Toolkit(region="us-en", tools=None, max_results=8, page_tokens=4000,
+                  **scraper_kwargs)          # e.g. transport=, proxy=, cache=
+```
+
+A memory cache is on by default, because agents repeat themselves.
+
+| Format | Definitions | Running the calls |
+| --- | --- | --- |
+| OpenAI | `toolkit.openai_tools()` | `toolkit.handle_openai_tool_calls(message.tool_calls)` → `role: "tool"` messages |
+| Anthropic | `toolkit.anthropic_tools()` | `toolkit.handle_anthropic_tool_use(response.content)` → `tool_result` blocks |
+| LangChain | `toolkit.langchain_tools()` (`StructuredTool`, needs `langchain-core`) | the framework |
+| LlamaIndex | `toolkit.llamaindex_tools()` (`FunctionTool`, needs `llama-index-core`) | the framework |
+| CrewAI | `toolkit.crewai_tools()` (`BaseTool`, needs `crewai`) | the framework |
+| Anything else | `toolkit.call(name, arguments)` → JSON text | – |
+
+A complete Anthropic loop:
+
+```python
+messages = [{"role": "user", "content": "Who founded Credo Capital?"}]
+while True:
+    response = client.messages.create(model="claude-sonnet-5", max_tokens=2048,
+                                      tools=toolkit.anthropic_tools(), messages=messages)
+    messages.append({"role": "assistant", "content": response.content})
+    if response.stop_reason != "tool_use":
+        break
+    messages.append({"role": "user", "content": toolkit.handle_anthropic_tool_use(response.content)})
+```
+
+Tool errors (a bad URL, a missing argument, an exception inside a tool) come
+back as `{"error": "..."}` — with `is_error: true` on Anthropic tool results —
+so the model sees the problem and adapts instead of the loop crashing.
+Module-level shortcuts (`headless.tools.openai_tools()`, `call_tool()`, …) use
+a default `Toolkit`.
+
+---
+
+## MCP server
+
+```bash
+pip install "headless-driver[mcp]"      # Python 3.10+
+headless-driver mcp
+```
+
+Serves `search`, `search_aggregate`, `fetch_page`, `extract` and `screenshot`
+over the Model Context Protocol with server instructions explaining when to use
+each and how to read `blocked`. Client configuration:
+
+```json
+{"mcpServers": {"web": {"command": "headless-driver", "args": ["mcp"]}}}
+```
+
+```json
+{"mcpServers": {"web": {"command": "uvx",
+                        "args": ["--from", "headless-driver[mcp]", "headless-driver", "mcp"]}}}
+```
+
+Claude Code: `claude mcp add web -- headless-driver mcp`.
+
+From Python, `headless.mcp_server.build_server(toolkit=None, **toolkit_kwargs)`
+returns the SDK server object (MCP 2.x `MCPServer` or 1.x `FastMCP`) to extend
+or run; `serve(transport, host, port, **toolkit_kwargs)` runs it;
+`claude_desktop_config(uvx=False)` returns the JSON above. Over stdio every
+diagnostic goes to stderr, keeping the protocol stream clean.
+
+---
+
+## Caching and pagination
+
+```python
+AdvancedSearchScraper(cache="memory")                     # MemoryCache: per process, LRU
+AdvancedSearchScraper(cache="sqlite:///~/.cache/hd.db")   # SQLiteCache: on disk, WAL, multi-process
+AdvancedSearchScraper(cache="redis://localhost:6379/0")   # RedisCache: shared by a fleet
+AdvancedSearchScraper(cache=RedisCache(my_client, prefix="app:"))
+AdvancedSearchScraper(cache=my_object)                    # anything with get(key) / set(key, value, ttl)
+```
+
+The cache stores one engine's answer to one query, keyed by engine, query
+(case and spacing ignored), page, result limit and region. A cached answer
+serves both search modes, and is used even while that engine is cooling down.
+`ok` answers live `cache_ttl` seconds (24 h), `empty` ones `cache_empty_ttl`
+(1 h), refusals are never stored. Values are JSON, so a `result_processor`
+returning something JSON cannot hold simply is not cached. A failing cache is
+logged and bypassed. `response.cached` says whether anything was fetched;
+`scraper.clear_cache()` empties it. The cache is closed on `quit()` when it was
+created from a string.
+
+Pagination:
+
+```python
+response = scraper.search(query, pages=3)
+```
+
+Fetches up to three pages from the answering engine (from every engine in
+aggregate mode), each up to `max_results`, de-duplicated, each result tagged
+with its `page`. Paging stops at the first page that is refused, empty or adds
+nothing new. Engines declare how in `page_params` (Brave `offset`, DuckDuckGo
+`s`, Yahoo `b`, Mojeek `s`, Google `start`, Bing `first`, …); `duckduckgo_js`
+returns one page.
+
+---
+
+## Typed results
+
+```python
+for hit in response.typed():     # headless.SearchResult dataclasses
+    hit.url, hit.title, hit.snippet, hit.engine, hit.votes, hit.engines, hit.ranks, hit.page
+    hit["url"]                   # dict-style access still works
+    hit.extra                    # keys a custom result_processor added
+
+response.to_pydantic()           # pydantic models (needs pydantic)
+headless.models.pydantic_model() # the model class, e.g. for JSON schema
+```
+
+---
+
 ## Parallel searching
 
 One WebDriver session cannot be driven from several threads, so a single
@@ -1391,7 +1641,8 @@ From the repository root:
 
 ```bash
 pip install -e ".[dev,fast]" && playwright install chromium
-python -m unittest discover -s tests          # everything: unit, fixtures, e2e (360+ tests)
+python -m unittest discover -s tests          # everything: unit, fixtures, e2e (410+ tests)
+python -m unittest tests.test_v12             # 1.2: cache, pages, Markdown, tools, MCP
 python -m unittest tests.test_v11             # 1.1 features, offline, fast
 python -m unittest tests.test_cli             # CLI and UI, offline, instant
 python -m unittest discover -s tests/e2e      # the end-to-end suite alone
@@ -1425,6 +1676,18 @@ python -m unittest tests.test_v11.TestAggregate.test_results_are_ranked_by_agree
 ```
 
 `pytest` works unchanged if you prefer it.
+
+The documentation site builds from `docs/` and `mkdocs.yml` (guides, plus this
+file, the changelog and the roadmap included verbatim, plus an API reference
+generated from docstrings):
+
+```bash
+pip install -e ".[docs]"
+mkdocs serve            # http://127.0.0.1:8000
+mkdocs build --strict
+```
+
+`.github/workflows/docs.yml` publishes it to GitHub Pages on every push to `main`.
 
 ---
 

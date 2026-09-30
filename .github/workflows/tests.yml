@@ -87,7 +87,7 @@ jobs:
           echo "PY=$PY" >> "$GITHUB_ENV"
           "$PY" -m pip install --upgrade pip
           WHEEL="$(ls dist/*.whl)"
-          "$PY" -m pip install "${WHEEL}[impersonate,http,playwright]"
+          "$PY" -m pip install "${WHEEL}[impersonate,http,playwright,mcp]"
           "$PY" -m playwright install --with-deps chromium
           "$PY" -m headless.cli --version
 
